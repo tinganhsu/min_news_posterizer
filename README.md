@@ -43,9 +43,6 @@ inkypi plugin install newspaper_poster https://github.com/doowylloh88/InkyPi-New
 
 - I've updated the newspaper list to include over 600 newspapers sourced from [freedom forum]( https://frontpages.freedomforum.org)
 
-- HUGE CAVEAT: I'm in developer mode ONLY. I don't have an e-ink screen yet.  They are sold out everywhere.  As I wait for stocks to resupply,  I'm creating plug-ins I want. I'm running off a Raspberry Pi 5.  Most of the image processing happens on the Open AI side, so it shouldn't slam a Pi Zero 2W any more than the other existing image plug-ins
-
-
 ## License
 
 This project is licensed under the GNU public License
