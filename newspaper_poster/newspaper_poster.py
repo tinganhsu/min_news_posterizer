@@ -14,6 +14,7 @@ from flask import abort, jsonify, request
 from groq import Groq
 from openai import BadRequestError, OpenAI
 from PIL import Image, ImageColor, ImageOps
+from dotenv import load_dotenv, find_dotenv
 
 from blueprints.plugin import plugin_bp
 from plugins.base_plugin.base_plugin import BasePlugin
@@ -24,11 +25,12 @@ from .poster_rules import POSTER_RULES
 
 logger = logging.getLogger(__name__)
 
+DOTENV_PATH = find_dotenv(filename=".env", usecwd=False)
+if DOTENV_PATH:
+    load_dotenv(dotenv_path=DOTENV_PATH, override=False)
+
 
 FREEDOM_FORUM_URL = "https://cdn.freedomforum.org/dfp/jpg{}/lg/{}.jpg"
-
-_GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPEN_AI_SECRET")
 
 VIBES_FILE = Path(__file__).parent / "vibes.json"
 
@@ -199,10 +201,95 @@ class NewspaperPoster(BasePlugin):
     def __init__(self, config):
         super().__init__(config)
         self.config = config
-        self._groq_client = Groq(api_key=_GROQ_API_KEY) if _GROQ_API_KEY else None
+
+    def generate_settings_template(self):
+        template_params = super().generate_settings_template()
+
+        template_params["api_key_openai"] = {
+            "required": True,
+            "service": "OpenAI",
+            "expected_key": "OPEN_AI_SECRET",
+        }
+        template_params["api_key_groq"] = {
+            "required": True,
+            "service": "Groq",
+            "expected_key": "GROQ_API_KEY",
+        }
+
+        # required by settings.html
+        template_params["newspapers"] = NEWSPAPERS
+
+        # ---- key presence (dotenv already loaded above) ----
+        groq_key = os.getenv("GROQ_API_KEY")
+        openai_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPEN_AI_SECRET")
+
+        # ---- IMAGE models ----
+        image_models = []
+        for model_id, meta in MODEL_CATALOG["image"].items():
+            provider = (meta or {}).get("provider")
+            if provider == "openai" and not _has_key(openai_key):
+                continue
+            image_models.append({"id": model_id, "label": meta.get("label", model_id)})
+        template_params["image_models"] = image_models  # always present
+
+        # ---- ANALYSIS models ----
+        analysis_models = []
+        for model_id, meta in MODEL_CATALOG["analysis"].items():
+            provider = (meta or {}).get("provider")
+            if provider == "groq" and not _has_key(groq_key):
+                continue
+            if provider == "openai" and not _has_key(openai_key):
+                continue
+            analysis_models.append({"id": model_id, "label": meta.get("label", model_id)})
+        template_params["analysis_models"] = analysis_models  # always present
+
+        return template_params
+
+    def get_analysis_client(self, device_config, model_meta):
+        provider = (model_meta or {}).get("provider")
+        if provider == "groq":
+            api_key = device_config.load_env_key("GROQ_API_KEY")
+            return Groq(api_key=api_key) if api_key else None
+
+        if provider == "openai":
+            api_key = (
+                device_config.load_env_key("OPEN_AI_SECRET")
+                or device_config.load_env_key("OPENAI_API_KEY")
+            )
+            return OpenAI(api_key=api_key) if api_key else None
+
+        return None
+    
 
     # Grab that headline and article - or at least try by analyzing front page 
-    def analyze_front_page(self, image_url: str, model_id: str, model_meta: dict):
+
+    def _looks_blocked_or_useless(self, parsed: dict, raw_text: str) -> bool:
+        headline = (parsed.get("headline") or "").strip()
+        article = (parsed.get("article") or "").strip()
+        raw = (raw_text or "").strip()
+
+        if not headline:
+            return True
+
+        refusal_markers = [
+            "i'm sorry", "i'm unable", "i cannot assist", "i can’t assist",
+            "i can't assist", "i can't help", "i cannot help", 
+            "can't help with that", "cannot help with that",
+            "unable to comply", "copyright"
+        ]
+
+        low_article = article.lower()
+        low_raw = raw.lower()
+        
+        if any(m in low_article for m in refusal_markers):
+            return True
+        if any(m in low_raw for m in refusal_markers) and len(raw) < 300:
+            return True
+
+        return False
+    
+    def analyze_front_page(self, image_url: str, model_id: str, model_meta: dict, device_config):
+        # YOUR ORIGINAL PROMPT - Fully Restored
         prompt_text = (
             "Look at the front page image and do TWO tasks.\n"
             "1) Extract the single MAIN banner headline.\n"
@@ -214,56 +301,33 @@ class NewspaperPoster(BasePlugin):
             "- Headline must be ONLY the headline words (no colon, no extra text).\n"
             "- ARTICLE must NOT repeat the headline.\n"
             "- Do not include the newspaper name, date, bylines, section labels, or subheadlines.\n"
-            )
+        )
+
+        client = self.get_analysis_client(device_config, model_meta)
+        if not client:
+            logger.warning("No analysis client could be initialized.")
+            return None
 
         provider = (model_meta or {}).get("provider")
 
-        # ---- Local helper: detect refusals / blocks / non-useful analysis ----
-        def _looks_blocked_or_useless(parsed: dict, raw_text: str) -> bool:
-            headline = (parsed.get("headline") or "").strip()
-            article = (parsed.get("article") or "").strip()
-            raw = (raw_text or "").strip()
+        try:
+            if provider == "groq":
+                # Groq OpenAI-compat vision call
+                resp = client.chat.completions.create(
+                    model=model_id,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                        ],
+                    }],
+                    max_tokens=600,
+                )
+                text = (resp.choices[0].message.content or "").strip()
 
-            # Must have a headline to proceed
-            if not headline:
-                # If raw is a refusal, treat as blocked; otherwise it's just malformed
-                return True
-
-            # Common refusal / copyright / can't assist signals.  NYT, WP, WSJ have issues with GPT.  Llama is better
-            refusal_markers = [
-                "i'm sorry",
-                "i'm unable",
-                "i cannot assist",
-                "i can’t assist",
-                "i can't assist",
-                "i can't help",
-                "i cannot help",
-                "can't help with that",
-                "cannot help with that",
-                "unable to comply",
-                "copyright",
-            ]
-
-            low = article.lower()
-            if any(m in low for m in refusal_markers):
-                return True
-
-            # Also catch when the whole response is basically a refusal
-            low_raw = raw.lower()
-            if any(m in low_raw for m in refusal_markers) and len(raw) < 300:
-                return True
-
-            return False
-
-        # ---- OpenAI path (ChatGPT-4o) ----
-        if provider == "openai":
-            if not _OPENAI_API_KEY:
-                logger.warning("OpenAI analysis selected but OPENAI key not set; cannot analyze front page.")
-                return None
-
-            client = OpenAI(api_key=_OPENAI_API_KEY)
-
-            try:
+            elif provider == "openai":
+                # OpenAI multimodal uses Responses API
                 resp = client.responses.create(
                     model=model_id,  # e.g. "gpt-4o"
                     input=[{
@@ -275,76 +339,34 @@ class NewspaperPoster(BasePlugin):
                     }],
                     max_output_tokens=600,
                 )
-
                 text = (resp.output_text or "").strip()
-                if not text:
-                    logger.warning("OpenAI returned empty output_text for image analysis.")
-                    return None
 
-                parsed = self._parse_headline_article(text)
-
-                print("\n" + "=" * 60, flush=True)
-                print("DEBUG ANALYSIS RESULT", flush=True)
-                print("HEADLINE:", (parsed.get("headline") or "").strip(), flush=True)
-                print("ARTICLE:",  (parsed.get("article")  or "").strip(), flush=True)
-                print("=" * 60 + "\n", flush=True)
-
-                # If the model refused / was blocked / returned unusable output, treat as failure
-                if _looks_blocked_or_useless(parsed, text):
-                    logger.warning("Analysis blocked/refused or unusable. Raw output:\n%s", text)
-                    return None
-
-                return parsed
-
-            except Exception as e:
-                logger.exception(f"OpenAI image analysis failed: {e}")
+            else:
+                logger.warning("Unknown analysis provider: %s", provider)
                 return None
 
-        # ---- Groq path (Llama-4) ----
-        if provider == "groq":
-            if not self._groq_client:
-                logger.warning("Groq analysis selected but GROQ_API_KEY not set; cannot analyze front page.")
+            if not text:
+                logger.warning("Analysis returned empty text.")
                 return None
 
-            try:
-                resp = self._groq_client.chat.completions.create(
-                    model=model_id,  # e.g. "meta-llama/llama-4-scout-17b-16e-instruct"
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt_text},
-                                {"type": "image_url", "image_url": {"url": image_url}},
-                            ],
-                        }
-                    ],
-                    max_tokens=512,
-                )
-                text = (resp.choices[0].message.content or "").strip()
-                if not text:
-                    logger.warning("Groq returned empty content for image analysis.")
-                    return None
+            parsed = self._parse_headline_article(text)
 
-                parsed = self._parse_headline_article(text)
+            print("\n" + "=" * 60)
+            print(f"DEBUG ANALYSIS RESULT ({provider.upper()})")
+            print("HEADLINE:", parsed.get("headline"))
+            print("ARTICLE:",  parsed.get("article"))
+            print("=" * 60 + "\n")
 
-                print("\n" + "=" * 60, flush=True)
-                print("DEBUG ANALYSIS RESULT (GROQ)", flush=True)
-                print("HEADLINE:", (parsed.get("headline") or "").strip(), flush=True)
-                print("ARTICLE:",  (parsed.get("article")  or "").strip(), flush=True)
-                print("=" * 60 + "\n", flush=True)
-
-                if _looks_blocked_or_useless(parsed, text):
-                    logger.warning("Groq analysis blocked/refused or unusable. Raw output:\n%s", text)
-                    return None
-
-                return parsed
-
-            except Exception as e:
-                logger.exception(f"Groq image analysis failed: {e}")
+            if self._looks_blocked_or_useless(parsed, text):
+                logger.warning("Analysis blocked/refused or unusable for %s", image_url)
                 return None
 
-        logger.warning(f"Unknown analysis provider '{provider}' for model '{model_id}'")
-        return None
+            return parsed
+
+        except Exception as e:
+            logger.exception("Image analysis failed: %s", e)
+            return None
+
 
     # Parse the headline and article from the above raw
     def _parse_headline_article(self, text: str) -> dict:
@@ -415,8 +437,11 @@ class NewspaperPoster(BasePlugin):
 
    # Decide what to generate (find front page → analyze → build prompt)
     def generate_image(self, settings, device_config):
-
-    # 1. Resolve Settings
+        """
+        Coordinates the workflow: 
+        1. Find newspaper -> 2. Analyze page -> 3. Build prompt -> 4. Generate art.
+        """
+        # 1. Resolve Settings
         newspaper_slug = settings.get("newspaper_id") or settings.get("newspaperSlug")
         if not newspaper_slug:
             raise RuntimeError("Newspaper ID not provided in settings.")
@@ -425,173 +450,120 @@ class NewspaperPoster(BasePlugin):
         today = datetime.today()
 
         # 2. Date Cycling: Try Next Day, Today, then 2 Days Prior
-        days = [today + timedelta(days=diff) for diff in [1, 0, -1, -2]]
+        # This helps if today's paper isn't uploaded yet or is blocked by AI filters.
+        days = [today + timedelta(days=diff) for diff in range(1, -8, -1)]
+
 
         analysis = None
+        selected_url = None
+
         for date in days:
             image_url = FREEDOM_FORUM_URL.format(date.day, newspaper_slug)
-            print(f"GROQ_IMAGE_URL: {image_url}")
+            
+            try:
+                # Use a head request to see if the image exists without downloading it
+                check = requests.head(image_url, timeout=(5, 15), allow_redirects=True)
+                
+                if check.status_code == 200:
+                    logger.info(f"Found {newspaper_slug} for day {date.day}. Starting analysis...")
+                    
+                    analysis_model_id, analysis_meta = _pick_model(settings, "analysis")
+                    
+                    # Call analysis with the required device_config argument
+                    analysis = self.analyze_front_page(image_url, analysis_model_id, analysis_meta, device_config)
 
-            head_timeout = (5, 15)
-            head_retries = 1
-
-            for attempt in range(head_retries + 1):
-                try:
-                    check = requests.head(
-                        image_url,
-                        timeout=head_timeout,
-                        allow_redirects=True,
-                    )
-                    if check.status_code == 200:
-                        name = next(
-                            (n["name"] for n in NEWSPAPERS if n.get("slug", "").upper() == newspaper_slug),
-                            newspaper_slug
-                        )
-                        print(f"SELECTED: {name} ({newspaper_slug}) | {date.strftime('%Y-%m-%d')} | day={date.day}")
-                        logger.info(f"Found {newspaper_slug} for day {date.day}")
-
-                        analysis_model_id, analysis_meta = _pick_model(settings, "analysis")
-                        analysis = self.analyze_front_page(image_url, analysis_model_id, analysis_meta)
-
-                        # IMPORTANT: if analyze_front_page returns None (blocked/refusal), keep searching other days
-                        if analysis:
-                            break
-                    else:
-                        logger.info(f"HEAD status={check.status_code} for {image_url}")
+                    # If analysis returns None (due to refusal markers), the loop continues to the next day
+                    if analysis:
+                        selected_url = image_url
                         break
-                except Exception as e:
-                    logger.warning(f"HEAD attempt {attempt+1}/{head_retries+1} failed for {image_url}: {e}")
-                    if attempt < head_retries:
-                        time.sleep(1.0)
-                    else:
-                        logger.error(f"Failed to check URL {image_url}: {e}")
+                else:
+                    logger.info(f"Newspaper not available at {image_url} (Status: {check.status_code})")
+            except Exception as e:
+                logger.warning(f"Failed to check URL {image_url}: {e}")
 
-            if analysis:
-                break
-
-        # If analysis is still None, we NEVER generate an image. This triggers the UI error modal.
+        # If we exhausted all dates and found nothing or were blocked by every attempt
         if not analysis:
             raise RuntimeError(
-                "Could not extract headline/article text from that front page (likely blocked/refused). "
-                "Try switching Analysis Model to Groq, or choose a different newspaper/day."
+                "Could not extract headline/article text from the front page. "
+                "The AI may be blocking this specific paper, or the archive is unavailable."
             )
 
+        # 3. Build Prompt and Generate Final Image
         vibe_id = settings.get("vibe_id")
-
         ai_prompt = self.build_ai_prompt(vibe_id, analysis)
-        image = self.generate_openai_image(ai_prompt, settings, device_config)
-        return image
+        
+        return self.generate_openai_image(ai_prompt, settings, device_config)
 
     #Render (prompt → OpenAI image → fit to screen).
     def generate_openai_image(self, ai_prompt: str, settings, device_config) -> Image.Image:
-            if not _OPENAI_API_KEY:
-                raise RuntimeError("OpenAI API key not set.")
+        """
+        Communicates with OpenAI to generate the poster art based on the analyzed headline.
+        """
+        # Load API Key via framework standard
+        api_key = (
+        device_config.load_env_key("OPEN_AI_SECRET")
+        or device_config.load_env_key("OPENAI_API_KEY")
+    )   
+        if not api_key:
+            raise RuntimeError("OpenAI API key not found (OPEN_AI_SECRET / OPENAI_API_KEY).")
 
-            # 1. Resolve Model and Orientation
-            image_model_id, image_meta = _pick_model(settings, "image")
-            IMAGE_MODEL = image_model_id 
+        # 1. Resolve Model and Display Dimensions
+        image_model_id, image_meta = _pick_model(settings, "image")
+        orientation = (device_config.get_config("orientation") or "horizontal").lower()
+        w, h = device_config.get_resolution()
 
-            orientation = (device_config.get_config("orientation") or "horizontal").lower()
-            w, h = device_config.get_resolution()
+        # Handle rotation/orientation for target dimensions
+        if orientation == "vertical" and w > h:
+            w, h = h, w
+        elif orientation == "horizontal" and h > w:
+            w, h = h, w
 
-            # Normalize target dims to match orientation
-            if orientation == "vertical" and w > h:
-                w, h = h, w
-            elif orientation == "horizontal" and h > w:
-                w, h = h, w
+        # Map to OpenAI supported aspect ratios
+        size = "1536x1024" if orientation == "horizontal" else "1024x1536"
+        
+        # Initialize client locally to keep memory footprint low
+        client = OpenAI(api_key=api_key)
 
-            # Map to OpenAI supported sizes
-            size = "1536x1024" if orientation == "horizontal" else "1024x1536"
+        logger.info(f"Generating image: {image_model_id} | {size}")
 
-            print(f"\n--- GENERATING IMAGE ---")
-            print(f"Model: {IMAGE_MODEL} | Size: {size} | Target: {w}x{h}")
-            
-            client = OpenAI(api_key=_OPENAI_API_KEY)
+        # 2. API Request with Safety Handling
+        try:
+            resp = client.images.generate(
+                model=image_model_id,
+                prompt=ai_prompt,
+                size=size,
+                n=1,
+            )
+        except BadRequestError as e:
+            err = getattr(e, "body", None) or {}
+            err_obj = err.get("error", {}) if isinstance(err, dict) else {}
+            if err_obj.get("code") == "moderation_blocked":
+                raise RuntimeError("OpenAI safety system blocked this prompt/headline.")
+            raise RuntimeError(f"OpenAI Error: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Image generation failed: {e}")
 
-            # 2. Call OpenAI with Safety Error Handling
-            try:
-                resp = client.images.generate(
-                    model=IMAGE_MODEL,
-                    prompt=ai_prompt,
-                    size=size,
-                    n=1,
-                )
-            except BadRequestError as e:
-                # Handle Moderation / Safety blocks specifically
-                err = getattr(e, "body", None) or {}
-                err_obj = (err or {}).get("error", {}) if isinstance(err, dict) else {}
-                if err_obj.get("code") == "moderation_blocked":
-                    logger.error(f"Moderation blocked: {err_obj.get('message')}")
-                    raise RuntimeError("OpenAI safety system blocked this headline/prompt.")
-                raise RuntimeError(f"OpenAI Image Error: {e}")
-            except Exception as e:
-                raise RuntimeError(f"OpenAI image generation failed: {e}")
+        # 3. Download and Process Image
+        img_data = resp.data[0]
+        if hasattr(img_data, "b64_json") and img_data.b64_json:
+            img = Image.open(BytesIO(base64.b64decode(img_data.b64_json))).convert("RGB")
+        elif hasattr(img_data, "url") and img_data.url:
+            # Using standard requests here; framework session is also an option
+            r = requests.get(img_data.url, timeout=20)
+            r.raise_for_status()
+            img = Image.open(BytesIO(r.content)).convert("RGB")
+        else:
+            raise RuntimeError("API returned no usable image data.")
 
-            # 3. Process the Result
-            img0 = resp.data[0] if (resp.data and len(resp.data) > 0) else None
-            if not img0:
-                raise RuntimeError("OpenAI returned no image data.")
-
-            if getattr(img0, "b64_json", None):
-                img = Image.open(BytesIO(base64.b64decode(img0.b64_json))).convert("RGB")
-            elif getattr(img0, "url", None):
-                r = requests.get(img0.url, timeout=20)
-                r.raise_for_status()
-                img = Image.open(BytesIO(r.content)).convert("RGB")
+        # 4. Final Formatting (Scaling/Padding)
+        target_dimensions = (w, h)
+        if settings.get("padImage") == "true":
+            if settings.get("backgroundOption") == "blur":
+                return pad_image_blur(img, target_dimensions)
             else:
-                raise RuntimeError("OpenAI returned neither b64_json nor url.")
+                bg_hex = settings.get("backgroundColor") or "#ffffff"
+                background_color = ImageColor.getcolor(bg_hex, "RGB")
+                return ImageOps.pad(img, target_dimensions, color=background_color, method=Image.Resampling.LANCZOS)
 
-            # 4. Final Scale and Pad
-            target_dimensions = (w, h)
-            if settings.get("padImage") == "true":
-                if settings.get("backgroundOption") == "blur":
-                    return pad_image_blur(img, target_dimensions)
-                else:
-                    bg_hex = settings.get("backgroundColor") or "#ffffff"
-                    background_color = ImageColor.getcolor(bg_hex, "RGB")
-                    return ImageOps.pad(img, target_dimensions, color=background_color, method=Image.Resampling.LANCZOS)
-
-            return img
-
-    #Let's talk to the HTML
-    def generate_settings_template(self):
-        template_params = super().generate_settings_template()
-
-        settings_obj = template_params.get("plugin_settings") or {}
-        if not isinstance(settings_obj, dict):
-            settings_obj = {}
-        template_params["plugin_settings"] = settings_obj
-
-        # Re-read keys at request time (don’t trust module globals)
-        groq_key = os.getenv("GROQ_API_KEY")
-        openai_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPEN_AI_SECRET")
-
-        # API Required 
-        template_params["api_key"] = {
-            "required": True,
-            "service": "OpenAI",
-            "expected_key": "OPEN_AI_SECRET"
-        }
-
-        # ---- filter IMAGE models (all are OpenAI in your catalog) ----
-        image_models = []
-        for model_id, meta in MODEL_CATALOG["image"].items():
-            provider = (meta or {}).get("provider")
-            if provider == "openai" and not _has_key(openai_key):
-                continue
-            image_models.append({"id": model_id, "label": meta.get("label", model_id)})
-        template_params["image_models"] = image_models  # always present (maybe [])
-
-        # ---- filter ANALYSIS models ----
-        analysis_models = []
-        for model_id, meta in MODEL_CATALOG["analysis"].items():
-            provider = (meta or {}).get("provider")
-            if provider == "groq" and not _has_key(groq_key):
-                continue
-            if provider == "openai" and not _has_key(openai_key):
-                continue
-            analysis_models.append({"id": model_id, "label": meta.get("label", model_id)})
-        template_params["analysis_models"] = analysis_models  # always present (maybe [])
-
-        template_params["newspapers"] = NEWSPAPERS
-        return template_params
+        # Default to direct resize if padding isn't requested
+        return img.resize(target_dimensions, Image.Resampling.LANCZOS)
