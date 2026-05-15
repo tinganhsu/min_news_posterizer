@@ -1,6 +1,0 @@
-{
-    "display_name": "Headline Posterizer",
-    "id": "newspaper_poster",
-    "class": "NewspaperPoster",
-    "image_settings": ["keep-width"]
-}

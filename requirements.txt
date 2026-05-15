@@ -1,5 +1,4 @@
 # AI Service SDKs
-openai
 groq
 
 # Image Processing & Utilities

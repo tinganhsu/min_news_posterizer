@@ -1,4 +1,3 @@
-import base64
 import json
 import logging
 import os
@@ -12,7 +11,6 @@ from pathlib import Path
 import requests
 from flask import abort, jsonify, request
 from groq import Groq
-from openai import BadRequestError, OpenAI
 from PIL import Image, ImageColor, ImageOps
 from dotenv import load_dotenv, find_dotenv
 
@@ -31,31 +29,73 @@ if DOTENV_PATH:
 
 
 FREEDOM_FORUM_URL = "https://cdn.freedomforum.org/dfp/jpg{}/lg/{}.jpg"
+ONE_MIN_CHAT_URL = "https://api.1min.ai/api/chat-with-ai"
+ONE_MIN_FEATURES_URL = "https://api.1min.ai/api/features"
+PLUGIN_ID = "1min-news-posterizer"
 
 VIBES_FILE = Path(__file__).parent / "vibes.json"
 
-# Model registry - Image = Open Ai, Front Page Analysis = llama or GPT-4o
+# Model registry - Image = 1min.ai, Front Page Analysis = 1min.ai or Groq/Llama
 MODEL_CATALOG = {
     "image": {
-        "gpt-image-1-mini": {"label": "Image 1 Mini (OpenAI)", "provider": "openai"},
-        "gpt-image-1":      {"label": "Image 1 (OpenAI)",      "provider": "openai"},
-        "gpt-image-1.5":    {"label": "Image 1.5 (OpenAI)",    "provider": "openai"},
+        "gpt-image-1-mini": {"label": "GPT Image 1 Mini (1min.ai)", "provider": "1min"},
     },
     "analysis": {
         "meta-llama/llama-4-scout-17b-16e-instruct": {"label": "Llama-4 (Groq)",       "provider": "groq"},
-        "gpt-4o":                                   {"label": "ChatGPT-4o (OpenAI)",  "provider": "openai"},
+        "gpt-4o-mini":                              {"label": "GPT-4o Mini (1min.ai)", "provider": "1min"},
     },
 }
 
 DEFAULT_MODELS = {
     "image": "gpt-image-1-mini",
-    # default headline analysis to ChatGPT-4o (OpenAI) - But llama is better at pulling headlines.
-    "analysis": os.getenv("VISION_MODEL", "gpt-4o").strip(),
+    # default headline analysis to GPT-4o Mini through 1min.ai.
+    "analysis": os.getenv("VISION_MODEL", "gpt-4o-mini").strip(),
 }
 
 # Fixes Issue with the api key appearing blank and not rendering the drop-downs properly 
 def _has_key(v) -> bool:
     return bool(v and str(v).strip())
+
+def _load_1min_api_key(device_config=None) -> str:
+    key_names = ("ONE_MIN_AI_API_KEY", "ONE_MIN_API_KEY", "ONEMIN_API_KEY", "1MIN_API_KEY")
+    if device_config:
+        for key_name in key_names:
+            value = device_config.load_env_key(key_name)
+            if _has_key(value):
+                return value.strip()
+    for key_name in key_names:
+        value = os.getenv(key_name)
+        if _has_key(value):
+            return value.strip()
+    return ""
+
+def _one_min_headers(api_key: str) -> dict:
+    return {
+        "Content-Type": "application/json",
+        "API-KEY": api_key,
+    }
+
+def _extract_1min_result_text(payload: dict) -> str:
+    detail = (payload.get("aiRecord") or {}).get("aiRecordDetail") or {}
+    result = detail.get("resultObject")
+    if isinstance(result, list):
+        return "\n".join(str(item) for item in result if item is not None).strip()
+    if isinstance(result, str):
+        return result.strip()
+    return ""
+
+def _extract_1min_image_url(payload: dict) -> str:
+    record = payload.get("aiRecord") or {}
+    temporary_url = (record.get("temporaryUrl") or "").strip()
+    if temporary_url:
+        return temporary_url
+    detail = record.get("aiRecordDetail") or {}
+    result = detail.get("resultObject")
+    if isinstance(result, list) and result:
+        first = str(result[0] or "").strip()
+        if first.startswith(("http://", "https://")):
+            return first
+    return ""
 
 # Choose the user-selected image/analysis model from settings
 def _pick_model(settings: dict, kind: str):
@@ -122,7 +162,7 @@ def _sorted(vibes: list) -> list:
 # Define a GET endpoint and read me some vibes
 @plugin_bp.get("/plugin/<plugin_id>/vibes/list")
 def vibes_list(plugin_id):
-    if plugin_id != "newspaper_poster":
+    if plugin_id != PLUGIN_ID:
         abort(404)
     vibes = _sorted(_read_vibes())
     resp = jsonify({"ok": True, "vibes": vibes})
@@ -133,7 +173,7 @@ def vibes_list(plugin_id):
 # Add vibe
 @plugin_bp.post("/plugin/<plugin_id>/vibes/add")
 def vibes_add(plugin_id):
-    if plugin_id != "newspaper_poster":
+    if plugin_id != PLUGIN_ID:
         abort(404)
 
     payload = request.get_json(silent=True) or {}
@@ -181,7 +221,7 @@ def vibes_add(plugin_id):
 # Delete a vibe - No confirmation, you better be sure! 
 @plugin_bp.post("/plugin/<plugin_id>/vibes/delete")
 def vibes_delete(plugin_id):
-    if plugin_id != "newspaper_poster":
+    if plugin_id != PLUGIN_ID:
         abort(404)
 
     payload = request.get_json(silent=True) or {}
@@ -205,10 +245,10 @@ class NewspaperPoster(BasePlugin):
     def generate_settings_template(self):
         template_params = super().generate_settings_template()
 
-        template_params["api_key_openai"] = {
+        template_params["api_key_1min"] = {
             "required": True,
-            "service": "OpenAI",
-            "expected_key": "OPEN_AI_SECRET",
+            "service": "1min.ai",
+            "expected_key": "ONE_MIN_AI_API_KEY",
         }
         template_params["api_key_groq"] = {
             "required": True,
@@ -221,13 +261,13 @@ class NewspaperPoster(BasePlugin):
 
         # ---- key presence (dotenv already loaded above) ----
         groq_key = os.getenv("GROQ_API_KEY")
-        openai_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPEN_AI_SECRET")
+        one_min_key = _load_1min_api_key()
 
         # ---- IMAGE models ----
         image_models = []
         for model_id, meta in MODEL_CATALOG["image"].items():
             provider = (meta or {}).get("provider")
-            if provider == "openai" and not _has_key(openai_key):
+            if provider == "1min" and not _has_key(one_min_key):
                 continue
             image_models.append({"id": model_id, "label": meta.get("label", model_id)})
         template_params["image_models"] = image_models  # always present
@@ -238,7 +278,7 @@ class NewspaperPoster(BasePlugin):
             provider = (meta or {}).get("provider")
             if provider == "groq" and not _has_key(groq_key):
                 continue
-            if provider == "openai" and not _has_key(openai_key):
+            if provider == "1min" and not _has_key(one_min_key):
                 continue
             analysis_models.append({"id": model_id, "label": meta.get("label", model_id)})
         template_params["analysis_models"] = analysis_models  # always present
@@ -251,12 +291,9 @@ class NewspaperPoster(BasePlugin):
             api_key = device_config.load_env_key("GROQ_API_KEY")
             return Groq(api_key=api_key) if api_key else None
 
-        if provider == "openai":
-            api_key = (
-                device_config.load_env_key("OPEN_AI_SECRET")
-                or device_config.load_env_key("OPENAI_API_KEY")
-            )
-            return OpenAI(api_key=api_key) if api_key else None
+        if provider == "1min":
+            api_key = _load_1min_api_key(device_config)
+            return api_key or None
 
         return None
     
@@ -326,20 +363,24 @@ class NewspaperPoster(BasePlugin):
                 )
                 text = (resp.choices[0].message.content or "").strip()
 
-            elif provider == "openai":
-                # OpenAI multimodal uses Responses API
-                resp = client.responses.create(
-                    model=model_id,  # e.g. "gpt-4o"
-                    input=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": prompt_text},
-                            {"type": "input_image", "image_url": image_url},
-                        ],
-                    }],
-                    max_output_tokens=600,
+            elif provider == "1min":
+                resp = requests.post(
+                    ONE_MIN_CHAT_URL,
+                    headers=_one_min_headers(client),
+                    json={
+                        "type": "UNIFY_CHAT_WITH_AI",
+                        "model": model_id,
+                        "promptObject": {
+                            "prompt": prompt_text,
+                            "attachments": {
+                                "images": [image_url],
+                            },
+                        },
+                    },
+                    timeout=(10, 120),
                 )
-                text = (resp.output_text or "").strip()
+                resp.raise_for_status()
+                text = _extract_1min_result_text(resp.json())
 
             else:
                 logger.warning("Unknown analysis provider: %s", provider)
@@ -492,23 +533,20 @@ class NewspaperPoster(BasePlugin):
         vibe_id = settings.get("vibe_id")
         ai_prompt = self.build_ai_prompt(vibe_id, analysis)
         
-        return self.generate_openai_image(ai_prompt, settings, device_config)
+        return self.generate_1min_image(ai_prompt, settings, device_config)
 
-    #Render (prompt → OpenAI image → fit to screen).
-    def generate_openai_image(self, ai_prompt: str, settings, device_config) -> Image.Image:
+    #Render (prompt -> 1min.ai image -> fit to screen).
+    def generate_1min_image(self, ai_prompt: str, settings, device_config) -> Image.Image:
         """
-        Communicates with OpenAI to generate the poster art based on the analyzed headline.
+        Communicates with 1min.ai to generate the poster art based on the analyzed headline.
         """
         # Load API Key via framework standard
-        api_key = (
-        device_config.load_env_key("OPEN_AI_SECRET")
-        or device_config.load_env_key("OPENAI_API_KEY")
-    )   
+        api_key = _load_1min_api_key(device_config)
         if not api_key:
-            raise RuntimeError("OpenAI API key not found (OPEN_AI_SECRET / OPENAI_API_KEY).")
+            raise RuntimeError("1min.ai API key not found (ONE_MIN_AI_API_KEY).")
 
         # 1. Resolve Model and Display Dimensions
-        image_model_id, image_meta = _pick_model(settings, "image")
+        image_model_id, _image_meta = _pick_model(settings, "image")
         orientation = (device_config.get_config("orientation") or "horizontal").lower()
         w, h = device_config.get_resolution()
 
@@ -518,42 +556,42 @@ class NewspaperPoster(BasePlugin):
         elif orientation == "horizontal" and h > w:
             w, h = h, w
 
-        # Map to OpenAI supported aspect ratios
+        # Map to 1min.ai gpt-image-1-mini supported sizes.
         size = "1536x1024" if orientation == "horizontal" else "1024x1536"
-        
-        # Initialize client locally to keep memory footprint low
-        client = OpenAI(api_key=api_key)
 
         logger.info(f"Generating image: {image_model_id} | {size}")
 
-        # 2. API Request with Safety Handling
+        # 2. API Request
         try:
-            resp = client.images.generate(
-                model=image_model_id,
-                prompt=ai_prompt,
-                size=size,
-                n=1,
+            resp = requests.post(
+                ONE_MIN_FEATURES_URL,
+                headers=_one_min_headers(api_key),
+                json={
+                    "type": "IMAGE_GENERATOR",
+                    "model": image_model_id,
+                    "promptObject": {
+                        "prompt": ai_prompt,
+                        "n": 1,
+                        "size": size,
+                        "quality": "medium",
+                        "output_format": "png",
+                        "background": "opaque",
+                    },
+                },
+                timeout=(10, 180),
             )
-        except BadRequestError as e:
-            err = getattr(e, "body", None) or {}
-            err_obj = err.get("error", {}) if isinstance(err, dict) else {}
-            if err_obj.get("code") == "moderation_blocked":
-                raise RuntimeError("OpenAI safety system blocked this prompt/headline.")
-            raise RuntimeError(f"OpenAI Error: {e}")
+            resp.raise_for_status()
         except Exception as e:
             raise RuntimeError(f"Image generation failed: {e}")
 
         # 3. Download and Process Image
-        img_data = resp.data[0]
-        if hasattr(img_data, "b64_json") and img_data.b64_json:
-            img = Image.open(BytesIO(base64.b64decode(img_data.b64_json))).convert("RGB")
-        elif hasattr(img_data, "url") and img_data.url:
-            # Using standard requests here; framework session is also an option
-            r = requests.get(img_data.url, timeout=20)
-            r.raise_for_status()
-            img = Image.open(BytesIO(r.content)).convert("RGB")
-        else:
-            raise RuntimeError("API returned no usable image data.")
+        image_url = _extract_1min_image_url(resp.json())
+        if not image_url:
+            raise RuntimeError("1min.ai returned no usable image URL.")
+
+        r = requests.get(image_url, timeout=(10, 60))
+        r.raise_for_status()
+        img = Image.open(BytesIO(r.content)).convert("RGB")
 
         # 4. Final Formatting (Scaling/Padding)
         target_dimensions = (w, h)

@@ -47,11 +47,11 @@
             <option value="">Loading vibes…</option>
           </select>
 
-            <img src="/images/newspaper_poster/plus.png" alt="Add a Vibe"
+            <img src="/images/1min-news-posterizer/plus.png" alt="Add a Vibe"
             style="width:24px;height:24px;cursor:pointer; flex:0 0 auto;"
             onclick="openVibeAddModal()">
 
-            <img src="/images/newspaper_poster/minus.png" alt="Delete a Vibe"
+            <img src="/images/1min-news-posterizer/minus.png" alt="Delete a Vibe"
             style="width:24px;height:24px;cursor:pointer; flex:0 0 auto;"
              onclick="openVibeDeleteModal()">
     </div>
@@ -268,7 +268,7 @@
   // We are using /plugin/<plugin_id>
   function _pluginBasePath() {
     const p = (window.location.pathname || "").replace(/\/+$/, "");
-    // expected: /plugin/newspaper_poster
+    // expected: /plugin/1min-news-posterizer
     return p;
   }
 
