@@ -38,7 +38,9 @@ VIBES_FILE = Path(__file__).parent / "vibes.json"
 # Model registry - Image = 1min.ai, Front Page Analysis = 1min.ai or Groq/Llama
 MODEL_CATALOG = {
     "image": {
-        "gpt-image-1-mini": {"label": "GPT Image 1 Mini (1min.ai)", "provider": "1min"},
+        "gpt-image-1-mini":                 {"label": "GPT Image 1 Mini (1min.ai)",              "provider": "1min"},
+        "gpt-image-2":                      {"label": "GPT Image 2 (1min.ai)",                   "provider": "1min"},
+        "gemini-3.1-flash-image-preview":   {"label": "Gemini 3.1 Flash Image Preview (1min.ai)", "provider": "1min"},
     },
     "analysis": {
         "meta-llama/llama-4-scout-17b-16e-instruct": {"label": "Llama-4 (Groq)",       "provider": "groq"},
@@ -556,8 +558,27 @@ class NewspaperPoster(BasePlugin):
         elif orientation == "horizontal" and h > w:
             w, h = h, w
 
-        # Map to 1min.ai gpt-image-1-mini supported sizes.
+        # Map display orientation to the requested generation size.
         size = "1536x1024" if orientation == "horizontal" else "1024x1536"
+        aspect_ratio = "3:2" if orientation == "horizontal" else "2:3"
+
+        if image_model_id == "gemini-3.1-flash-image-preview":
+            prompt_object = {
+                "prompt": ai_prompt,
+                "imageSize": "2K",
+                "aspectRatio": aspect_ratio,
+                "temperature": 1.0,
+                "topP": 0.95,
+            }
+        else:
+            prompt_object = {
+                "prompt": ai_prompt,
+                "n": 1,
+                "size": size,
+                "quality": "medium",
+                "output_format": "png",
+                "background": "opaque",
+            }
 
         logger.info(f"Generating image: {image_model_id} | {size}")
 
@@ -569,14 +590,7 @@ class NewspaperPoster(BasePlugin):
                 json={
                     "type": "IMAGE_GENERATOR",
                     "model": image_model_id,
-                    "promptObject": {
-                        "prompt": ai_prompt,
-                        "n": 1,
-                        "size": size,
-                        "quality": "medium",
-                        "output_format": "png",
-                        "background": "opaque",
-                    },
+                    "promptObject": prompt_object,
                 },
                 timeout=(10, 180),
             )
