@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 import time
@@ -134,6 +135,15 @@ def _get_vibe_description(vibe_id: str) -> str:
         if (v.get("id") or "").strip() == vibe_id:
             return (v.get("description") or "").strip()
     return ""
+
+def _pick_random_vibe_id() -> str:
+    vibes = [
+        v for v in _read_vibes()
+        if isinstance(v, dict) and (v.get("id") or "").strip() and (v.get("description") or "").strip()
+    ]
+    if not vibes:
+        return ""
+    return random.choice(vibes).get("id", "").strip()
 
 # Write into the vibes.json using atomic write
 def _atomic_write_json(path: Path, data) -> None:
@@ -532,7 +542,8 @@ class NewspaperPoster(BasePlugin):
             )
 
         # 3. Build Prompt and Generate Final Image
-        vibe_id = settings.get("vibe_id")
+        random_vibe = str(settings.get("randomVibe") or "").lower() == "true"
+        vibe_id = _pick_random_vibe_id() if random_vibe else settings.get("vibe_id")
         ai_prompt = self.build_ai_prompt(vibe_id, analysis)
         
         return self.generate_1min_image(ai_prompt, settings, device_config)
