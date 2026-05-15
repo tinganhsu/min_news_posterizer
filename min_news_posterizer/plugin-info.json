@@ -1,6 +1,6 @@
 {
     "display_name": "1min-news-posterizer",
-    "id": "1min-news-posterizer",
+    "id": "min_news_posterizer",
     "class": "NewspaperPoster",
     "image_settings": ["keep-width"]
 }

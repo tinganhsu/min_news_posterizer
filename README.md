@@ -18,7 +18,7 @@
 
 ## Screenshot
 
-![screenshot](https://github.com/doowylloh88/InkyPi-Newspaper-Posterizer/blob/main/1min-news-posterizer/docs/Skater_Headline.jpg)
+![screenshot](https://github.com/tinganhsu/1min-news-posterizer/blob/main/min_news_posterizer/docs/Skater_Headline.jpg)
 
 ## Installation
 
@@ -27,7 +27,7 @@
 Install the plugin using the InkyPi CLI, providing the plugin ID & GitHub repository URL:
 
 ```bash
-inkypi plugin install 1min-news-posterizer https://github.com/doowylloh88/InkyPi-Newspaper-Posterizer
+inkypi plugin install min_news_posterizer git@github.com:tinganhsu/1min-news-posterizer.git
 ```
 **Requirements**
 

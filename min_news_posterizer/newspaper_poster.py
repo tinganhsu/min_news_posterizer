@@ -31,7 +31,7 @@ if DOTENV_PATH:
 FREEDOM_FORUM_URL = "https://cdn.freedomforum.org/dfp/jpg{}/lg/{}.jpg"
 ONE_MIN_CHAT_URL = "https://api.1min.ai/api/chat-with-ai"
 ONE_MIN_FEATURES_URL = "https://api.1min.ai/api/features"
-PLUGIN_ID = "1min-news-posterizer"
+PLUGIN_ID = "min_news_posterizer"
 
 VIBES_FILE = Path(__file__).parent / "vibes.json"
 
