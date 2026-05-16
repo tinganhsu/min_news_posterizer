@@ -65,6 +65,14 @@
     </div>
 </div>
 
+<div class="form-group">
+    <label for="traditionalChinese" class="form-label">Traditional Chinese:</label>
+    <div class="toggle-container">
+        <input type="checkbox" id="traditionalChinese" name="traditionalChinese" class="toggle-checkbox" value="true">
+        <label for="traditionalChinese" class="toggle-label"></label>
+    </div>
+</div>
+
 <div id="vibeAddModal" class="modal">
     <div class="modal-content">
         <span class="close-button" onclick="closeVibeAddModal()">&times;</span>
@@ -507,6 +515,7 @@ async function confirmVibeDelete() {
     return {
       vibe_id: (document.getElementById("vibeSelect")?.value || ""),
       randomVibe: !!document.getElementById("randomVibe")?.checked,
+      traditionalChinese: !!document.getElementById("traditionalChinese")?.checked,
       padImage: !!document.getElementById("padImage")?.checked,
       backgroundOption: _getRadioValue("backgroundOption") || "blur",
       backgroundColor: (document.getElementById("backgroundColor")?.value || "#ffffff"),
@@ -525,6 +534,10 @@ async function confirmVibeDelete() {
 
     if (typeof saved.randomVibe === "boolean" && document.getElementById("randomVibe")) {
       document.getElementById("randomVibe").checked = saved.randomVibe;
+    }
+
+    if (typeof saved.traditionalChinese === "boolean" && document.getElementById("traditionalChinese")) {
+      document.getElementById("traditionalChinese").checked = saved.traditionalChinese;
     }
 
     // Scale to fit
@@ -551,7 +564,7 @@ async function confirmVibeDelete() {
     const save = () => _lsWrite(_captureUiSettings());
 
     // Save on changes
-    ["vibeSelect", "randomVibe", "padImage", "backgroundColor", "imageModel", "analysisModel"].forEach((id) => {
+    ["vibeSelect", "randomVibe", "traditionalChinese", "padImage", "backgroundColor", "imageModel", "analysisModel"].forEach((id) => {
       const el = document.getElementById(id);
       if (!el) return;
       el.addEventListener("change", save);

@@ -115,6 +115,12 @@ def _pick_model(settings: dict, kind: str):
 
     return model_id, MODEL_CATALOG[kind][model_id]
 
+def _setting_enabled(settings: dict, key: str) -> bool:
+    value = settings.get(key)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
 # Load some vibes and get their descriptions
 def _read_vibes() -> list:
     try:
@@ -337,7 +343,7 @@ class NewspaperPoster(BasePlugin):
 
         return False
     
-    def analyze_front_page(self, image_url: str, model_id: str, model_meta: dict, device_config):
+    def analyze_front_page(self, image_url: str, model_id: str, model_meta: dict, device_config, traditional_chinese: bool = False):
         # YOUR ORIGINAL PROMPT - Fully Restored
         prompt_text = (
             "Look at the front page image and do TWO tasks.\n"
@@ -351,6 +357,11 @@ class NewspaperPoster(BasePlugin):
             "- ARTICLE must NOT repeat the headline.\n"
             "- Do not include the newspaper name, date, bylines, section labels, or subheadlines.\n"
         )
+        if traditional_chinese:
+            prompt_text += (
+                "- Translate the extracted headline and article into natural Traditional Chinese used in Taiwan.\n"
+                "- Preserve names, places, numbers, and facts. Use Traditional Chinese characters only; do not use Simplified Chinese.\n"
+            )
 
         client = self.get_analysis_client(device_config, model_meta)
         if not client:
@@ -455,7 +466,7 @@ class NewspaperPoster(BasePlugin):
         return {"headline": headline, "article": article}
 
     # Build prompt to sends to image model: Headline, article, poster rules, text safety rules, and vibes
-    def build_ai_prompt(self, vibe_id: str, analysis: dict) -> str:
+    def build_ai_prompt(self, vibe_id: str, analysis: dict, traditional_chinese: bool = False) -> str:
         analysis = analysis or {}
         headline = (analysis.get("headline") or "").strip()
         article  = (analysis.get("article")  or "").strip()
@@ -478,9 +489,22 @@ class NewspaperPoster(BasePlugin):
             f"ARTICLE (summary / blurb): {article}\n"
         )
 
+        traditional_chinese_rules = ""
+        if traditional_chinese:
+            traditional_chinese_rules = (
+                "TRADITIONAL CHINESE TEXT RENDERING RULES:\n"
+                "- Render all poster text in natural Traditional Chinese used in Taiwan.\n"
+                "- Use a real Traditional Chinese capable font such as Noto Sans CJK TC, Source Han Sans TC, PingFang TC, or Microsoft JhengHei.\n"
+                "- Keep every Chinese character crisp, correctly formed, and legible. Do not invent pseudo-Chinese glyphs, garbled characters, mojibake, or random strokes.\n"
+                "- Use the provided Chinese wording exactly when possible; shorten only for layout while preserving meaning.\n"
+                "- The ALL CAPS poster rule applies only to Latin letters; Chinese text has no uppercase/lowercase.\n"
+                "- Do not use Simplified Chinese characters.\n\n"
+            )
+
         final_prompt = (
             f"{(vibe_text + '\n\n') if vibe_text else ''}"
             f"{rules_text}\n\n"
+            f"{traditional_chinese_rules}"
             f"{story_block}\n"
           
         ).strip()
@@ -509,6 +533,7 @@ class NewspaperPoster(BasePlugin):
 
         analysis = None
         selected_url = None
+        traditional_chinese = _setting_enabled(settings, "traditionalChinese")
 
         for date in days:
             image_url = FREEDOM_FORUM_URL.format(date.day, newspaper_slug)
@@ -523,7 +548,13 @@ class NewspaperPoster(BasePlugin):
                     analysis_model_id, analysis_meta = _pick_model(settings, "analysis")
                     
                     # Call analysis with the required device_config argument
-                    analysis = self.analyze_front_page(image_url, analysis_model_id, analysis_meta, device_config)
+                    analysis = self.analyze_front_page(
+                        image_url,
+                        analysis_model_id,
+                        analysis_meta,
+                        device_config,
+                        traditional_chinese=traditional_chinese,
+                    )
 
                     # If analysis returns None (due to refusal markers), the loop continues to the next day
                     if analysis:
@@ -542,9 +573,9 @@ class NewspaperPoster(BasePlugin):
             )
 
         # 3. Build Prompt and Generate Final Image
-        random_vibe = str(settings.get("randomVibe") or "").lower() == "true"
+        random_vibe = _setting_enabled(settings, "randomVibe")
         vibe_id = _pick_random_vibe_id() if random_vibe else settings.get("vibe_id")
-        ai_prompt = self.build_ai_prompt(vibe_id, analysis)
+        ai_prompt = self.build_ai_prompt(vibe_id, analysis, traditional_chinese=traditional_chinese)
         
         return self.generate_1min_image(ai_prompt, settings, device_config)
 
@@ -620,7 +651,7 @@ class NewspaperPoster(BasePlugin):
 
         # 4. Final Formatting (Scaling/Padding)
         target_dimensions = (w, h)
-        if settings.get("padImage") == "true":
+        if _setting_enabled(settings, "padImage"):
             if settings.get("backgroundOption") == "blur":
                 return pad_image_blur(img, target_dimensions)
             else:
