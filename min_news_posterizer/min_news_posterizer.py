@@ -344,11 +344,23 @@ class NewspaperPoster(BasePlugin):
         return False
     
     def analyze_front_page(self, image_url: str, model_id: str, model_meta: dict, device_config, traditional_chinese: bool = False):
-        # YOUR ORIGINAL PROMPT - Fully Restored
+        language_rule = (
+            "After extracting the information from the image, translate the final HEADLINE and ARTICLE into "
+            "natural Traditional Chinese used in Taiwan. Preserve names, places, numbers, and facts. "
+            "Use Traditional Chinese characters only; do not use Simplified Chinese. "
+            "Do not answer in English except for proper nouns that should remain unchanged."
+            if traditional_chinese
+            else "Return the final HEADLINE and ARTICLE in the same language as the newspaper image."
+        )
+
         prompt_text = (
-            "Look at the front page image and do TWO tasks.\n"
-            "1) Extract the single MAIN banner headline.\n"
-            "2) Find the matching article blurb on the front page and rewrite it as ONE paragraph.\n\n"
+            "You are receiving a newspaper front page image. You must inspect the image itself.\n"
+            "Do not say that you cannot view images. If the image is visible, perform OCR and visual reading.\n\n"
+            "TASKS:\n"
+            "1) Read the front page image and identify the single MAIN banner headline.\n"
+            "2) Read the matching article text or deck on the same front page, then rewrite it as ONE concise paragraph.\n"
+            "3) Apply this language rule to the final output: "
+            f"{language_rule}\n\n"
             "OUTPUT FORMAT (follow exactly):\n"
             "HEADLINE: <headline text>\n"
             "ARTICLE: <one-paragraph article blurb>\n\n"
@@ -356,12 +368,9 @@ class NewspaperPoster(BasePlugin):
             "- Headline must be ONLY the headline words (no colon, no extra text).\n"
             "- ARTICLE must NOT repeat the headline.\n"
             "- Do not include the newspaper name, date, bylines, section labels, or subheadlines.\n"
+            "- Do not describe the image or explain your process.\n"
+            "- If some small text is unreadable, use only the readable visual evidence and do not mention uncertainty.\n"
         )
-        if traditional_chinese:
-            prompt_text += (
-                "- Translate the extracted headline and article into natural Traditional Chinese used in Taiwan.\n"
-                "- Preserve names, places, numbers, and facts. Use Traditional Chinese characters only; do not use Simplified Chinese.\n"
-            )
 
         client = self.get_analysis_client(device_config, model_meta)
         if not client:
