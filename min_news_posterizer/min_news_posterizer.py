@@ -11,7 +11,6 @@ from pathlib import Path
 
 import requests
 from flask import abort, jsonify, request
-from groq import Groq
 from PIL import Image, ImageColor, ImageOps
 from dotenv import load_dotenv, find_dotenv
 
@@ -36,7 +35,7 @@ PLUGIN_ID = "min_news_posterizer"
 
 VIBES_FILE = Path(__file__).parent / "vibes.json"
 
-# Model registry - Image = 1min.ai, Front Page Analysis = 1min.ai or Groq/Llama
+# Model registry - Image = 1min.ai, Front Page Analysis = 1min.ai
 MODEL_CATALOG = {
     "image": {
         "gpt-image-1-mini":                 {"label": "GPT Image 1 Mini (1min.ai)",              "provider": "1min"},
@@ -44,8 +43,7 @@ MODEL_CATALOG = {
         "gemini-3.1-flash-image-preview":   {"label": "Gemini 3.1 Flash Image Preview (1min.ai)", "provider": "1min"},
     },
     "analysis": {
-        "meta-llama/llama-4-scout-17b-16e-instruct": {"label": "Llama-4 (Groq)",       "provider": "groq"},
-        "gpt-4o-mini":                              {"label": "GPT-4o Mini (1min.ai)", "provider": "1min"},
+        "gpt-4o-mini": {"label": "GPT-4o Mini (1min.ai)", "provider": "1min"},
     },
 }
 
@@ -268,17 +266,11 @@ class NewspaperPoster(BasePlugin):
             "service": "1min.ai",
             "expected_key": "ONE_MIN_AI_API_KEY",
         }
-        template_params["api_key_groq"] = {
-            "required": True,
-            "service": "Groq",
-            "expected_key": "GROQ_API_KEY",
-        }
 
         # required by settings.html
         template_params["newspapers"] = NEWSPAPERS
 
         # ---- key presence (dotenv already loaded above) ----
-        groq_key = os.getenv("GROQ_API_KEY")
         one_min_key = _load_1min_api_key()
 
         # ---- IMAGE models ----
@@ -294,8 +286,6 @@ class NewspaperPoster(BasePlugin):
         analysis_models = []
         for model_id, meta in MODEL_CATALOG["analysis"].items():
             provider = (meta or {}).get("provider")
-            if provider == "groq" and not _has_key(groq_key):
-                continue
             if provider == "1min" and not _has_key(one_min_key):
                 continue
             analysis_models.append({"id": model_id, "label": meta.get("label", model_id)})
@@ -305,10 +295,6 @@ class NewspaperPoster(BasePlugin):
 
     def get_analysis_client(self, device_config, model_meta):
         provider = (model_meta or {}).get("provider")
-        if provider == "groq":
-            api_key = device_config.load_env_key("GROQ_API_KEY")
-            return Groq(api_key=api_key) if api_key else None
-
         if provider == "1min":
             api_key = _load_1min_api_key(device_config)
             return api_key or None
@@ -380,22 +366,7 @@ class NewspaperPoster(BasePlugin):
         provider = (model_meta or {}).get("provider")
 
         try:
-            if provider == "groq":
-                # Groq OpenAI-compat vision call
-                resp = client.chat.completions.create(
-                    model=model_id,
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_text},
-                            {"type": "image_url", "image_url": {"url": image_url}},
-                        ],
-                    }],
-                    max_tokens=600,
-                )
-                text = (resp.choices[0].message.content or "").strip()
-
-            elif provider == "1min":
+            if provider == "1min":
                 resp = requests.post(
                     ONE_MIN_CHAT_URL,
                     headers=_one_min_headers(client),

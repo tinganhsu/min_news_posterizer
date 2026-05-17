@@ -1,6 +1,3 @@
-# AI Service SDKs
-groq
-
 # Image Processing & Utilities
 Pillow
 requests

@@ -33,7 +33,6 @@ inkypi plugin install min_news_posterizer git@github.com:tinganhsu/1min-news-pos
 
 - **1min.ai API** — You'll need a paid [1min.ai API](https://docs.1min.ai/docs/api/create-api-key) key to analyze the newspaper's front page and to generate an image. Add it to the InkyPi root `.env` file as `ONE_MIN_AI_API_KEY`.
 
-- **Flexible analysis** — You can also analyze the front page using [Groq / Llama Vision](https://console.groq.com/home) 
 - Put the API keys in the .env file in the Inky Pi root directory
 
 ## Development-status
