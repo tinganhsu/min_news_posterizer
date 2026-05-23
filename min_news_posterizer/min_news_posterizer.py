@@ -31,6 +31,7 @@ if DOTENV_PATH:
 FREEDOM_FORUM_URL = "https://cdn.freedomforum.org/dfp/jpg{}/lg/{}.jpg"
 ONE_MIN_CHAT_URL = "https://api.1min.ai/api/chat-with-ai"
 ONE_MIN_FEATURES_URL = "https://api.1min.ai/api/features"
+ONE_MIN_ASSET_BASE_URL = "https://asset.1min.ai"
 PLUGIN_ID = "min_news_posterizer"
 
 VIBES_FILE = Path(__file__).parent / "vibes.json"
@@ -96,7 +97,23 @@ def _extract_1min_image_url(payload: dict) -> str:
         first = str(result[0] or "").strip()
         if first.startswith(("http://", "https://")):
             return first
+        if first.startswith("images/"):
+            return f"{ONE_MIN_ASSET_BASE_URL}/{first}"
     return ""
+
+def _raise_for_1min_status(resp: requests.Response, action: str) -> None:
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        detail = ""
+        try:
+            body = resp.json()
+            detail = json.dumps(body, ensure_ascii=False)
+        except Exception:
+            detail = (resp.text or "").strip()
+        if detail:
+            raise RuntimeError(f"{action}: {e}; response: {detail}") from e
+        raise RuntimeError(f"{action}: {e}") from e
 
 # Choose the user-selected image/analysis model from settings
 def _pick_model(settings: dict, kind: str):
@@ -382,7 +399,7 @@ class NewspaperPoster(BasePlugin):
                     },
                     timeout=(10, 120),
                 )
-                resp.raise_for_status()
+                _raise_for_1min_status(resp, "Front page analysis failed")
                 text = _extract_1min_result_text(resp.json())
 
             else:
@@ -595,11 +612,9 @@ class NewspaperPoster(BasePlugin):
         else:
             prompt_object = {
                 "prompt": ai_prompt,
-                "n": 1,
-                "size": size,
-                "quality": "medium",
+                "num_outputs": 1,
+                "aspect_ratio": aspect_ratio,
                 "output_format": "png",
-                "background": "opaque",
             }
 
         logger.info(f"Generating image: {image_model_id} | {size}")
@@ -616,7 +631,7 @@ class NewspaperPoster(BasePlugin):
                 },
                 timeout=(10, 180),
             )
-            resp.raise_for_status()
+            _raise_for_1min_status(resp, "1min.ai image request failed")
         except Exception as e:
             raise RuntimeError(f"Image generation failed: {e}")
 
