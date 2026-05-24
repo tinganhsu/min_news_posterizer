@@ -614,6 +614,8 @@ class NewspaperPoster(BasePlugin):
                 "prompt": ai_prompt,
                 "num_outputs": 1,
                 "aspect_ratio": aspect_ratio,
+                "size": size,
+                "quality": "standard",
                 "output_format": "png",
             }
 
