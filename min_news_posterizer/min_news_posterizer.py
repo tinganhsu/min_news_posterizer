@@ -498,8 +498,9 @@ class NewspaperPoster(BasePlugin):
                 "- Do not use Simplified Chinese characters.\n\n"
             )
 
+        vibe_prefix = (vibe_text + "\n\n") if vibe_text else ""
         final_prompt = (
-            f"{(vibe_text + '\n\n') if vibe_text else ''}"
+            f"{vibe_prefix}"
             f"{rules_text}\n\n"
             f"{traditional_chinese_rules}"
             f"{story_block}\n"
