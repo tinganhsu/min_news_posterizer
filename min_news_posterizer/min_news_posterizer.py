@@ -39,9 +39,13 @@ VIBES_FILE = Path(__file__).parent / "vibes.json"
 # Model registry - Image = 1min.ai, Front Page Analysis = 1min.ai
 MODEL_CATALOG = {
     "image": {
-        "gpt-image-1-mini":                 {"label": "GPT Image 1 Mini (1min.ai)",              "provider": "1min"},
-        "gpt-image-2":                      {"label": "GPT Image 2 (1min.ai)",                   "provider": "1min"},
+        "gpt-image-1":                      {"label": "GPT Image 1 (1min.ai)",                    "provider": "1min"},
+        "gpt-image-1-mini":                 {"label": "GPT Image 1 Mini (1min.ai)",               "provider": "1min"},
+        "gpt-image-2":                      {"label": "GPT Image 2 (1min.ai)",                    "provider": "1min"},
         "gemini-3.1-flash-image-preview":   {"label": "Gemini 3.1 Flash Image Preview (1min.ai)", "provider": "1min"},
+        "gemini-3-pro-image-preview":       {"label": "Gemini 3 Pro Image Preview (1min.ai)",     "provider": "1min"},
+        "gemini-2-5-flash-image":           {"label": "Gemini 2.5 Flash Image (1min.ai)",         "provider": "1min"},
+        "grok-2-image-1212":                {"label": "Grok-2 Image (1min.ai)",                   "provider": "1min"},
     },
     "analysis": {
         "gpt-4o-mini": {"label": "GPT-4o Mini (1min.ai)", "provider": "1min"},
@@ -49,9 +53,17 @@ MODEL_CATALOG = {
 }
 
 DEFAULT_MODELS = {
-    "image": "gpt-image-1-mini",
+    "image": "gpt-image-1",
     # default headline analysis to GPT-4o Mini through 1min.ai.
     "analysis": os.getenv("VISION_MODEL", "gpt-4o-mini").strip(),
+}
+
+MODEL_ALIASES = {
+    "grok-2-image": "grok-2-image-1212",
+    "grok-2": "grok-2-image-1212",
+    "gemini-3-pro": "gemini-3-pro-image-preview",
+    "gemini-3.1-flash": "gemini-3.1-flash-image-preview",
+    "gemini-2.5-flash": "gemini-2-5-flash-image",
 }
 
 # Fixes Issue with the api key appearing blank and not rendering the drop-downs properly 
@@ -97,8 +109,14 @@ def _extract_1min_image_url(payload: dict) -> str:
         first = str(result[0] or "").strip()
         if first.startswith(("http://", "https://")):
             return first
-        if first.startswith("images/"):
-            return f"{ONE_MIN_ASSET_BASE_URL}/{first}"
+        if first:
+            return f"{ONE_MIN_ASSET_BASE_URL}/{first.lstrip('/')}"
+    elif isinstance(result, str) and result.strip():
+        first = result.strip()
+        if first.startswith(("http://", "https://")):
+            return first
+        if first:
+            return f"{ONE_MIN_ASSET_BASE_URL}/{first.lstrip('/')}"
     return ""
 
 def _raise_for_1min_status(resp: requests.Response, action: str) -> None:
@@ -118,10 +136,11 @@ def _raise_for_1min_status(resp: requests.Response, action: str) -> None:
 # Choose the user-selected image/analysis model from settings
 def _pick_model(settings: dict, kind: str):
     key = "imageModel" if kind == "image" else "analysisModel"
-    model_id = (settings.get(key) or DEFAULT_MODELS.get(kind, "") or "").strip()
+    raw_model_id = (settings.get(key) or DEFAULT_MODELS.get(kind, "") or "").strip()
+    model_id = MODEL_ALIASES.get(raw_model_id, raw_model_id)
 
     if model_id not in MODEL_CATALOG[kind]:
-        logger.warning(f"Unknown {kind} model '{model_id}', defaulting to {DEFAULT_MODELS.get(kind)}")
+        logger.warning(f"Unknown {kind} model '{raw_model_id}', defaulting to {DEFAULT_MODELS.get(kind)}")
         model_id = (DEFAULT_MODELS.get(kind) or "").strip()
 
     if model_id not in MODEL_CATALOG[kind]:
@@ -599,8 +618,9 @@ class NewspaperPoster(BasePlugin):
             w, h = h, w
 
         # Map display orientation to the requested generation size.
-        size = "1536x1024" if orientation == "horizontal" else "1024x1536"
-        aspect_ratio = "3:2" if orientation == "horizontal" else "2:3"
+        is_horizontal = (orientation == "horizontal")
+        aspect_ratio = "3:2" if is_horizontal else "2:3"
+        size = "1536x1024" if is_horizontal else "1024x1536"
 
         if image_model_id == "gemini-3.1-flash-image-preview":
             prompt_object = {
@@ -610,13 +630,33 @@ class NewspaperPoster(BasePlugin):
                 "temperature": 1.0,
                 "topP": 0.95,
             }
-        else:
+        elif image_model_id == "gemini-3-pro-image-preview":
             prompt_object = {
                 "prompt": ai_prompt,
-                "num_outputs": 1,
+                "imageSize": "2K",
+                "temperature": 1.0,
+                "topP": 0.95,
+            }
+        elif image_model_id == "gemini-2-5-flash-image":
+            prompt_object = {
+                "prompt": ai_prompt,
                 "aspect_ratio": aspect_ratio,
+            }
+        elif image_model_id in ("grok-2-image-1212", "grok-2-image"):
+            grok_size = "1024x768" if is_horizontal else "768x1024"
+            size = grok_size
+            prompt_object = {
+                "prompt": ai_prompt,
+                "n": 1,
+                "size": grok_size,
+            }
+        else:
+            # gpt-image-1, gpt-image-1-mini, gpt-image-2, etc.
+            prompt_object = {
+                "prompt": ai_prompt,
+                "n": 1,
                 "size": size,
-                "quality": "standard",
+                "quality": "medium",
                 "output_format": "png",
             }
 
