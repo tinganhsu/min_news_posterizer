@@ -39,9 +39,8 @@ VIBES_FILE = Path(__file__).parent / "vibes.json"
 # Model registry - Image = 1min.ai, Front Page Analysis = 1min.ai
 MODEL_CATALOG = {
     "image": {
-        "gpt-image-1":                      {"label": "GPT Image 1 (1min.ai)",                    "provider": "1min"},
-        "gpt-image-1-mini":                 {"label": "GPT Image 1 Mini (1min.ai)",               "provider": "1min"},
-        "gpt-image-2":                      {"label": "GPT Image 2 (1min.ai)",                    "provider": "1min"},
+        "gpt-image-2.5-sunburst":           {"label": "GPT Image 2.5 Sunburst (1min.ai)",         "provider": "1min"},
+        "gpt-image-2.5-flare":              {"label": "GPT Image 2.5 Flare (1min.ai)",            "provider": "1min"},
         "gemini-3.1-flash-image-preview":   {"label": "Gemini 3.1 Flash Image Preview (1min.ai)", "provider": "1min"},
         "gemini-3-pro-image-preview":       {"label": "Gemini 3 Pro Image Preview (1min.ai)",     "provider": "1min"},
         "gemini-2-5-flash-image":           {"label": "Gemini 2.5 Flash Image (1min.ai)",         "provider": "1min"},
@@ -53,7 +52,7 @@ MODEL_CATALOG = {
 }
 
 DEFAULT_MODELS = {
-    "image": "gpt-image-1",
+    "image": "gpt-image-2.5-flare",
     # default headline analysis to GPT-4o Mini through 1min.ai.
     "analysis": os.getenv("VISION_MODEL", "gpt-4o-mini").strip(),
 }
@@ -651,7 +650,7 @@ class NewspaperPoster(BasePlugin):
                 "size": grok_size,
             }
         else:
-            # gpt-image-1, gpt-image-1-mini, gpt-image-2, etc.
+            # gpt-image-2.5-sunburst, gpt-image-2.5-flare
             prompt_object = {
                 "prompt": ai_prompt,
                 "n": 1,
