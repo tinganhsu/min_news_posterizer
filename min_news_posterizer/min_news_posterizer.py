@@ -33,6 +33,7 @@ ONE_MIN_CHAT_URL = "https://api.1min.ai/api/chat-with-ai"
 ONE_MIN_FEATURES_URL = "https://api.1min.ai/api/features"
 ONE_MIN_ASSET_BASE_URL = "https://asset.1min.ai"
 PLUGIN_ID = "min_news_posterizer"
+MAX_IMAGE_PROMPT_CHARS = 4000
 
 VIBES_FILE = Path(__file__).parent / "vibes.json"
 
@@ -43,26 +44,22 @@ MODEL_CATALOG = {
         "gpt-image-2.5-flare":              {"label": "GPT Image 2.5 Flare (1min.ai)",            "provider": "1min"},
         "gemini-3.1-flash-image-preview":   {"label": "Gemini 3.1 Flash Image Preview (1min.ai)", "provider": "1min"},
         "gemini-3-pro-image-preview":       {"label": "Gemini 3 Pro Image Preview (1min.ai)",     "provider": "1min"},
-        "gemini-2-5-flash-image":           {"label": "Gemini 2.5 Flash Image (1min.ai)",         "provider": "1min"},
-        "grok-2-image-1212":                {"label": "Grok-2 Image (1min.ai)",                   "provider": "1min"},
     },
     "analysis": {
+        "gpt-6-luna":  {"label": "GPT-6 Luna (1min.ai)",  "provider": "1min"},
         "gpt-4o-mini": {"label": "GPT-4o Mini (1min.ai)", "provider": "1min"},
     },
 }
 
 DEFAULT_MODELS = {
     "image": "gpt-image-2.5-flare",
-    # default headline analysis to GPT-4o Mini through 1min.ai.
-    "analysis": os.getenv("VISION_MODEL", "gpt-4o-mini").strip(),
+    # default headline analysis to GPT-6 Luna through 1min.ai.
+    "analysis": os.getenv("VISION_MODEL", "gpt-6-luna").strip(),
 }
 
 MODEL_ALIASES = {
-    "grok-2-image": "grok-2-image-1212",
-    "grok-2": "grok-2-image-1212",
     "gemini-3-pro": "gemini-3-pro-image-preview",
     "gemini-3.1-flash": "gemini-3.1-flash-image-preview",
-    "gemini-2.5-flash": "gemini-2-5-flash-image",
 }
 
 # Fixes Issue with the api key appearing blank and not rendering the drop-downs properly 
@@ -341,7 +338,7 @@ class NewspaperPoster(BasePlugin):
 
     def _looks_blocked_or_useless(self, parsed: dict, raw_text: str) -> bool:
         headline = (parsed.get("headline") or "").strip()
-        article = (parsed.get("article") or "").strip()
+        subhead = (parsed.get("subhead") or "").strip()
         raw = (raw_text or "").strip()
 
         if not headline:
@@ -349,48 +346,57 @@ class NewspaperPoster(BasePlugin):
 
         refusal_markers = [
             "i'm sorry", "i'm unable", "i cannot assist", "i can’t assist",
-            "i can't assist", "i can't help", "i cannot help", 
+            "i can't assist", "i can't help", "i cannot help",
             "can't help with that", "cannot help with that",
-            "unable to comply", "copyright"
+            "unable to comply", "copyright", "抱歉", "無法協助", "无法协助",
         ]
 
-        low_article = article.lower()
+        low_text = f"{headline} {subhead}".lower()
         low_raw = raw.lower()
-        
-        if any(m in low_article for m in refusal_markers):
+
+        if any(m in low_text for m in refusal_markers):
             return True
         if any(m in low_raw for m in refusal_markers) and len(raw) < 300:
             return True
 
         return False
-    
+
     def analyze_front_page(self, image_url: str, model_id: str, model_meta: dict, device_config, traditional_chinese: bool = False):
-        language_rule = (
-            "After extracting the information from the image, translate the final HEADLINE and ARTICLE into "
-            "natural Traditional Chinese used in Taiwan. Preserve names, places, numbers, and facts. "
-            "Use Traditional Chinese characters only; do not use Simplified Chinese. "
-            "Do not answer in English except for proper nouns that should remain unchanged."
-            if traditional_chinese
-            else "Return the final HEADLINE and ARTICLE in the same language as the newspaper image."
-        )
+        if traditional_chinese:
+            language_rule = (
+                "Write HEADLINE and SUBHEAD in natural Traditional Chinese as used in Taiwan (繁體中文). "
+                "Use Traditional characters only, never Simplified. Use the usual Taiwanese Chinese name for "
+                "people and places; if none exists, keep a short original name."
+            )
+            length_rule = (
+                "- HEADLINE: at most 12 Chinese characters.\n"
+                "- SUBHEAD: at most 20 Chinese characters.\n"
+                "- Use common, everyday characters; avoid rare or archaic characters.\n"
+            )
+        else:
+            language_rule = "Write HEADLINE and SUBHEAD in the same language as the newspaper."
+            length_rule = (
+                "- HEADLINE: at most 8 words.\n"
+                "- SUBHEAD: at most 14 words.\n"
+            )
 
         prompt_text = (
             "You are receiving a newspaper front page image. You must inspect the image itself.\n"
             "Do not say that you cannot view images. If the image is visible, perform OCR and visual reading.\n\n"
-            "TASKS:\n"
-            "1) Read the front page image and identify the single MAIN banner headline.\n"
-            "2) Read the matching article text or deck on the same front page, then rewrite it as ONE concise paragraph.\n"
-            "3) Apply this language rule to the final output: "
-            f"{language_rule}\n\n"
-            "OUTPUT FORMAT (follow exactly):\n"
-            "HEADLINE: <headline text>\n"
-            "ARTICLE: <one-paragraph article blurb>\n\n"
+            "TASK: Find the single MAIN story (the biggest banner headline) and write the text for a news poster about it, "
+            "so a reader understands the news at a glance.\n"
+            f"LANGUAGE: {language_rule}\n\n"
+            "OUTPUT FORMAT (exactly these 3 lines, nothing else):\n"
+            "HEADLINE: <short, punchy poster headline>\n"
+            "SUBHEAD: <one sentence saying who did what / what happened>\n"
+            "SCENE: <one English sentence describing what to draw: the main person or actor, the place, and 1-3 key objects>\n\n"
             "RULES:\n"
-            "- Headline must be ONLY the headline words (no colon, no extra text).\n"
-            "- ARTICLE must NOT repeat the headline.\n"
-            "- Do not include the newspaper name, date, bylines, section labels, or subheadlines.\n"
-            "- Do not describe the image or explain your process.\n"
-            "- If some small text is unreadable, use only the readable visual evidence and do not mention uncertainty.\n"
+            f"{length_rule}"
+            "- SUBHEAD must add information and must NOT repeat the headline.\n"
+            "- Use only facts from the front page; do not invent names, numbers, or places.\n"
+            "- No newspaper name, dates, bylines, quotation marks, emoji, or hashtags.\n"
+            "- SCENE must not ask for any text or lettering.\n"
+            "- Do not explain your process or mention uncertainty.\n"
         )
 
         client = self.get_analysis_client(device_config, model_meta)
@@ -428,12 +434,13 @@ class NewspaperPoster(BasePlugin):
                 logger.warning("Analysis returned empty text.")
                 return None
 
-            parsed = self._parse_headline_article(text)
+            parsed = self._parse_poster_text(text)
 
             print("\n" + "=" * 60)
             print(f"DEBUG ANALYSIS RESULT ({provider.upper()})")
             print("HEADLINE:", parsed.get("headline"))
-            print("ARTICLE:",  parsed.get("article"))
+            print("SUBHEAD:", parsed.get("subhead"))
+            print("SCENE:", parsed.get("scene"))
             print("=" * 60 + "\n")
 
             if self._looks_blocked_or_useless(parsed, text):
@@ -447,83 +454,61 @@ class NewspaperPoster(BasePlugin):
             return None
 
 
-    # Parse the headline and article from the above raw
-    def _parse_headline_article(self, text: str) -> dict:
-        headline = ""
-        article_lines = []
-        in_article = False
-
+    # Parse HEADLINE / SUBHEAD / SCENE lines from the analysis output
+    def _parse_poster_text(self, text: str) -> dict:
+        fields = {"HEADLINE": "", "SUBHEAD": "", "SCENE": ""}
         for raw in (text or "").splitlines():
-            line = raw.strip()
-            if not line:
-                continue
+            line = raw.strip().lstrip("*#-• ").replace("**", "")
+            match = re.match(r"^(HEADLINE|SUBHEAD|SCENE)\s*[:：]\s*(.*)$", line, re.IGNORECASE)
+            if match and not fields[match.group(1).upper()]:
+                # Quotes would break the quoted strings in the image prompt.
+                value = re.sub(r"[\"“”「」『』]", "", match.group(2)).strip()
+                fields[match.group(1).upper()] = value
+        return {
+            "headline": fields["HEADLINE"],
+            "subhead": fields["SUBHEAD"],
+            "scene": fields["SCENE"],
+        }
 
-            if line.startswith("HEADLINE:"):
-                headline = line.replace("HEADLINE:", "", 1).strip()
-                in_article = False
-                continue
-
-            if line.startswith("ARTICLE:"):
-                rest = line.replace("ARTICLE:", "", 1).strip()
-                if rest:
-                    article_lines.append(rest)
-                in_article = True
-                continue
-
-            if in_article:
-                article_lines.append(line)
-
-        article = " ".join(article_lines).strip()
-
-        if not headline and not article:
-            return {"headline": "", "article": text or ""}
-
-        return {"headline": headline, "article": article}
-
-    # Build prompt to sends to image model: Headline, article, poster rules, text safety rules, and vibes
+    # Build prompt for the image model: vibe style + scene + exact poster text
     def build_ai_prompt(self, vibe_id: str, analysis: dict, traditional_chinese: bool = False) -> str:
         analysis = analysis or {}
         headline = (analysis.get("headline") or "").strip()
-        article  = (analysis.get("article")  or "").strip()
+        subhead = (analysis.get("subhead") or "").strip()
+        scene = (analysis.get("scene") or "").strip() or "A scene that illustrates the headline."
 
-        if not headline and not article:
-            headline = "UNKNOWN HEADLINE"
-            article = "No article text extracted from the front page."
-
-        if isinstance(POSTER_RULES, dict):
-            rules_text = "\n".join(f"- {k}: {v}" for k, v in POSTER_RULES.items())
+        if traditional_chinese:
+            language = "Traditional Chinese (Taiwan, 繁體中文)"
+            typeface = "a bold, clean Traditional Chinese typeface (黑體 style)"
         else:
-            rules_text = str(POSTER_RULES).strip()
+            language = "the original language"
+            typeface = "a bold, clean, highly legible typeface"
 
-        vibe_text = _get_vibe_description(vibe_id)
+        text_lines = [f'1. Headline, large and dominant: "{headline}"']
+        if subhead:
+            text_lines.append(f'2. Subheadline, smaller, near the headline: "{subhead}"')
+        count = "two pieces" if subhead else "one piece"
 
-       
-        story_block = (
-            "STORY CONTENT TO USE:\n"
-            f"HEADLINE: {headline}\n"
-            f"ARTICLE (summary / blurb): {article}\n"
+        body = (
+            f"NEWS POSTER SCENE: {scene}\n\n"
+            f"{str(POSTER_RULES).strip()}\n\n"
+            "POSTER TEXT (overrides any text instructions in the style above):\n"
+            f"The poster contains exactly {count} of text in {language}, copied character by character:\n"
+            + "\n".join(text_lines) + "\n"
+            "- Do not add, remove, change, or translate any character.\n"
+            "- No other readable text anywhere, except short decorative stamp words explicitly named in the style above (e.g. APPROVED); callout boxes, signs, and labels stay blank.\n"
+            f"- Use {typeface}; every character complete and correctly formed.\n"
+            "- All text fully inside the poster with at least 8% margin from every edge; nothing cropped."
         )
 
-        traditional_chinese_rules = ""
-        if traditional_chinese:
-            traditional_chinese_rules = (
-                "TRADITIONAL CHINESE TEXT RENDERING RULES:\n"
-                "- Render all poster text in natural Traditional Chinese used in Taiwan.\n"
-                "- Use a real Traditional Chinese capable font such as Noto Sans CJK TC, Source Han Sans TC, PingFang TC, or Microsoft JhengHei.\n"
-                "- Keep every Chinese character crisp, correctly formed, and legible. Do not invent pseudo-Chinese glyphs, garbled characters, mojibake, or random strokes.\n"
-                "- Use the provided Chinese wording exactly when possible; shorten only for layout while preserving meaning.\n"
-                "- The ALL CAPS poster rule applies only to Latin letters; Chinese text has no uppercase/lowercase.\n"
-                "- Do not use Simplified Chinese characters.\n\n"
-            )
+        vibe_text = _get_vibe_description(vibe_id)
+        # GPT Image 2.5 rejects prompts over 4000 chars; trim the vibe to fit.
+        vibe_budget = MAX_IMAGE_PROMPT_CHARS - len(body) - 2
+        if vibe_text and len(vibe_text) > vibe_budget:
+            logger.warning("Vibe text trimmed from %d to %d chars to fit prompt limit", len(vibe_text), max(vibe_budget, 0))
+            vibe_text = vibe_text[:max(vibe_budget, 0)].rstrip()
 
-        vibe_prefix = (vibe_text + "\n\n") if vibe_text else ""
-        final_prompt = (
-            f"{vibe_prefix}"
-            f"{rules_text}\n\n"
-            f"{traditional_chinese_rules}"
-            f"{story_block}\n"
-          
-        ).strip()
+        final_prompt = (f"{vibe_text}\n\n{body}" if vibe_text else body).strip()
 
         #print("\n==== FINAL IMAGE PROMPT ====\n" + final_prompt + "\n==== END FINAL IMAGE PROMPT ====\n", flush=True)
         return final_prompt
@@ -584,7 +569,7 @@ class NewspaperPoster(BasePlugin):
         # If we exhausted all dates and found nothing or were blocked by every attempt
         if not analysis:
             raise RuntimeError(
-                "Could not extract headline/article text from the front page. "
+                "Could not extract headline text from the front page. "
                 "The AI may be blocking this specific paper, or the archive is unavailable."
             )
 
@@ -619,7 +604,8 @@ class NewspaperPoster(BasePlugin):
         # Map display orientation to the requested generation size.
         is_horizontal = (orientation == "horizontal")
         aspect_ratio = "3:2" if is_horizontal else "2:3"
-        size = "1536x1024" if is_horizontal else "1024x1536"
+        # 1024x640 is the smallest size GPT Image 2.5 allows (655,360 px); enough for e-ink.
+        size = "1024x640" if is_horizontal else "640x1024"
 
         if image_model_id == "gemini-3.1-flash-image-preview":
             prompt_object = {
@@ -635,19 +621,6 @@ class NewspaperPoster(BasePlugin):
                 "imageSize": "2K",
                 "temperature": 1.0,
                 "topP": 0.95,
-            }
-        elif image_model_id == "gemini-2-5-flash-image":
-            prompt_object = {
-                "prompt": ai_prompt,
-                "aspect_ratio": aspect_ratio,
-            }
-        elif image_model_id in ("grok-2-image-1212", "grok-2-image"):
-            grok_size = "1024x768" if is_horizontal else "768x1024"
-            size = grok_size
-            prompt_object = {
-                "prompt": ai_prompt,
-                "n": 1,
-                "size": grok_size,
             }
         else:
             # gpt-image-2.5-sunburst, gpt-image-2.5-flare
