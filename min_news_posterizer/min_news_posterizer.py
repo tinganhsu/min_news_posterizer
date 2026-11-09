@@ -47,7 +47,6 @@ MODEL_CATALOG = {
     },
     "analysis": {
         "gpt-6-luna":  {"label": "GPT-6 Luna (1min.ai)",  "provider": "1min"},
-        "gpt-4o-mini": {"label": "GPT-4o Mini (1min.ai)", "provider": "1min"},
     },
 }
 
