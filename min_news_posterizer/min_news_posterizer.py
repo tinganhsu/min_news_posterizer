@@ -20,6 +20,12 @@ from utils.image_utils import pad_image_blur
 
 from .constants import NEWSPAPERS
 from .poster_rules import POSTER_RULES
+from .taiwan_news import (
+    DEFAULT_TAIWAN_FEED_ID,
+    fetch_taiwan_news_items,
+    format_news_digest,
+    get_taiwan_feed_options,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +155,15 @@ def _setting_enabled(settings: dict, key: str) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+def _resolve_source_type(settings: dict) -> str:
+    source_type = (settings.get("sourceType") or "").strip().lower()
+    if source_type in {"taiwan_rss", "newspaper"}:
+        return source_type
+    # Backward compatibility: existing saved configs without sourceType keep using newspapers.
+    if settings.get("newspaper_id") or settings.get("newspaperSlug"):
+        return "newspaper"
+    return "taiwan_rss"
 
 # Load some vibes and get their descriptions
 def _read_vibes() -> list:
@@ -300,6 +315,8 @@ class NewspaperPoster(BasePlugin):
 
         # required by settings.html
         template_params["newspapers"] = NEWSPAPERS
+        template_params["taiwan_news_feeds"] = get_taiwan_feed_options()
+        template_params["default_taiwan_feed"] = DEFAULT_TAIWAN_FEED_ID
 
         # ---- key presence (dotenv already loaded above) ----
         one_min_key = _load_1min_api_key()
@@ -452,6 +469,107 @@ class NewspaperPoster(BasePlugin):
             logger.exception("Image analysis failed: %s", e)
             return None
 
+    def analyze_news_feed(
+        self,
+        news_digest: str,
+        focus: str,
+        model_id: str,
+        model_meta: dict,
+        device_config,
+        traditional_chinese: bool = True,
+    ):
+        if traditional_chinese:
+            language_rule = (
+                "Write HEADLINE and SUBHEAD in natural Traditional Chinese as used in Taiwan (繁體中文). "
+                "Use Traditional characters only, never Simplified. Use Taiwanese terminology and names."
+            )
+            length_rule = (
+                "- HEADLINE: at most 12 Chinese characters.\n"
+                "- SUBHEAD: at most 20 Chinese characters.\n"
+                "- Use common, everyday characters; avoid rare or archaic characters.\n"
+            )
+        else:
+            language_rule = "Write HEADLINE and SUBHEAD in concise, natural English."
+            length_rule = (
+                "- HEADLINE: at most 8 words.\n"
+                "- SUBHEAD: at most 14 words.\n"
+            )
+
+        prompt_text = (
+            "You are a senior news editor in Taiwan selecting today's single biggest headline for a stylized news poster.\n"
+            f"EDITORIAL FOCUS: {focus}.\n"
+            "Below is today's list of latest headlines from Taiwan and international news feeds.\n\n"
+            "TASK:\n"
+            "1. Pick the SINGLE most important, high-impact news event of the day (prefer major Taiwan or global "
+            "policy, economy, tech, diplomacy, or public-interest stories covered across multiple outlets; avoid "
+            "celebrity gossip, trivial local incidents, clickbait, or promotions).\n"
+            "2. Write the poster text so a reader understands the event at a glance.\n"
+            f"LANGUAGE: {language_rule}\n\n"
+            "OUTPUT FORMAT (exactly these 3 lines, nothing else):\n"
+            "HEADLINE: <short, punchy poster headline>\n"
+            "SUBHEAD: <one sentence saying who did what / what happened>\n"
+            "SCENE: <one English sentence describing what to draw: the main person or actor, the place, and 1-3 key objects>\n\n"
+            "RULES:\n"
+            f"{length_rule}"
+            "- SUBHEAD must add information and must NOT repeat the headline.\n"
+            "- Use only facts from the provided news list; do not invent names, numbers, or places.\n"
+            "- No media outlet names, dates, bylines, quotation marks, emoji, or hashtags.\n"
+            "- SCENE must not ask for any text or lettering.\n"
+            "- Do not explain your choice or mention uncertainty.\n\n"
+            "TODAY'S NEWS LIST:\n"
+            f"{news_digest}\n"
+        )
+
+        client = self.get_analysis_client(device_config, model_meta)
+        if not client:
+            logger.warning("No analysis client could be initialized.")
+            return None
+
+        provider = (model_meta or {}).get("provider")
+
+        try:
+            if provider == "1min":
+                resp = requests.post(
+                    ONE_MIN_CHAT_URL,
+                    headers=_one_min_headers(client),
+                    json={
+                        "type": "UNIFY_CHAT_WITH_AI",
+                        "model": model_id,
+                        "promptObject": {
+                            "prompt": prompt_text,
+                        },
+                    },
+                    timeout=(10, 120),
+                )
+                _raise_for_1min_status(resp, "Taiwan news feed analysis failed")
+                text = _extract_1min_result_text(resp.json())
+            else:
+                logger.warning("Unknown analysis provider: %s", provider)
+                return None
+
+            if not text:
+                logger.warning("News feed analysis returned empty text.")
+                return None
+
+            parsed = self._parse_poster_text(text)
+
+            print("\n" + "=" * 60)
+            print(f"DEBUG TAIWAN NEWS ANALYSIS RESULT ({provider.upper()})")
+            print("HEADLINE:", parsed.get("headline"))
+            print("SUBHEAD:", parsed.get("subhead"))
+            print("SCENE:", parsed.get("scene"))
+            print("=" * 60 + "\n")
+
+            if self._looks_blocked_or_useless(parsed, text):
+                logger.warning("News feed analysis blocked/refused or unusable.")
+                return None
+
+            return parsed
+
+        except Exception as e:
+            logger.exception("News feed analysis failed: %s", e)
+            return None
+
 
     # Parse HEADLINE / SUBHEAD / SCENE lines from the analysis output
     def _parse_poster_text(self, text: str) -> dict:
@@ -512,71 +630,97 @@ class NewspaperPoster(BasePlugin):
         #print("\n==== FINAL IMAGE PROMPT ====\n" + final_prompt + "\n==== END FINAL IMAGE PROMPT ====\n", flush=True)
         return final_prompt
 
-   # Decide what to generate (find front page → analyze → build prompt)
+    # Decide what to generate (fetch news/front page → analyze → build prompt)
     def generate_image(self, settings, device_config):
         """
-        Coordinates the workflow: 
-        1. Find newspaper -> 2. Analyze page -> 3. Build prompt -> 4. Generate art.
+        Coordinates the workflow:
+        1. Fetch Taiwan/International RSS news or newspaper front page
+        2. Analyze top story -> 3. Build prompt -> 4. Generate art.
         """
-        # 1. Resolve Settings
-        newspaper_slug = settings.get("newspaper_id") or settings.get("newspaperSlug")
-        if not newspaper_slug:
-            raise RuntimeError("Newspaper ID not provided in settings.")
-
-        newspaper_slug = newspaper_slug.upper()
-        today = datetime.today()
-
-        # 2. Date Cycling: Try Next Day, Today, then 2 Days Prior
-        # This helps if today's paper isn't uploaded yet or is blocked by AI filters.
-        days = [today + timedelta(days=diff) for diff in range(1, -8, -1)]
-
-
+        source_type = _resolve_source_type(settings)
         analysis = None
-        selected_url = None
         traditional_chinese = _setting_enabled(settings, "traditionalChinese")
 
-        for date in days:
-            image_url = FREEDOM_FORUM_URL.format(date.day, newspaper_slug)
-            
-            try:
-                # Use a head request to see if the image exists without downloading it
-                check = requests.head(image_url, timeout=(5, 15), allow_redirects=True)
-                
-                if check.status_code == 200:
-                    logger.info(f"Found {newspaper_slug} for day {date.day}. Starting analysis...")
-                    
-                    analysis_model_id, analysis_meta = _pick_model(settings, "analysis")
-                    
-                    # Call analysis with the required device_config argument
-                    analysis = self.analyze_front_page(
-                        image_url,
-                        analysis_model_id,
-                        analysis_meta,
-                        device_config,
-                        traditional_chinese=traditional_chinese,
-                    )
+        if source_type == "taiwan_rss":
+            feed_id = (settings.get("twNewsFeed") or DEFAULT_TAIWAN_FEED_ID).strip()
+            custom_rss_url = (settings.get("customRssUrl") or "").strip()
+            items, focus = fetch_taiwan_news_items(feed_id=feed_id, custom_rss_url=custom_rss_url)
+            if not items:
+                raise RuntimeError(
+                    "Could not fetch any news items from the selected Taiwan/International RSS feed."
+                )
 
-                    # If analysis returns None (due to refusal markers), the loop continues to the next day
-                    if analysis:
-                        selected_url = image_url
-                        break
-                else:
-                    logger.info(f"Newspaper not available at {image_url} (Status: {check.status_code})")
-            except Exception as e:
-                logger.warning(f"Failed to check URL {image_url}: {e}")
-
-        # If we exhausted all dates and found nothing or were blocked by every attempt
-        if not analysis:
-            raise RuntimeError(
-                "Could not extract headline text from the front page. "
-                "The AI may be blocking this specific paper, or the archive is unavailable."
+            news_digest = format_news_digest(items)
+            analysis_model_id, analysis_meta = _pick_model(settings, "analysis")
+            # Taiwan RSS mode always renders Traditional Chinese poster text.
+            traditional_chinese = True
+            analysis = self.analyze_news_feed(
+                news_digest=news_digest,
+                focus=focus,
+                model_id=analysis_model_id,
+                model_meta=analysis_meta,
+                device_config=device_config,
+                traditional_chinese=traditional_chinese,
             )
+
+            if not analysis:
+                raise RuntimeError(
+                    "Could not select and summarize a headline from the Taiwan/International news feed."
+                )
+        else:
+            # 1. Resolve Newspaper Settings
+            newspaper_slug = settings.get("newspaper_id") or settings.get("newspaperSlug")
+            if not newspaper_slug:
+                raise RuntimeError("Newspaper ID not provided in settings.")
+
+            newspaper_slug = newspaper_slug.upper()
+            today = datetime.today()
+
+            # 2. Date Cycling: Try Next Day, Today, then Prior Days
+            # This helps if today's paper isn't uploaded yet or is blocked by AI filters.
+            days = [today + timedelta(days=diff) for diff in range(1, -8, -1)]
+
+            for date in days:
+                image_url = FREEDOM_FORUM_URL.format(date.day, newspaper_slug)
+
+                try:
+                    # Use a head request to see if the image exists without downloading it
+                    check = requests.head(image_url, timeout=(5, 15), allow_redirects=True)
+
+                    if check.status_code == 200:
+                        logger.info(f"Found {newspaper_slug} for day {date.day}. Starting analysis...")
+
+                        analysis_model_id, analysis_meta = _pick_model(settings, "analysis")
+
+                        # Call analysis with the required device_config argument
+                        analysis = self.analyze_front_page(
+                            image_url,
+                            analysis_model_id,
+                            analysis_meta,
+                            device_config,
+                            traditional_chinese=traditional_chinese,
+                        )
+
+                        # If analysis returns None (due to refusal markers), the loop continues to the next day
+                        if analysis:
+                            break
+                    else:
+                        logger.info(f"Newspaper not available at {image_url} (Status: {check.status_code})")
+                except Exception as e:
+                    logger.warning(f"Failed to check URL {image_url}: {e}")
+
+            # If we exhausted all dates and found nothing or were blocked by every attempt
+            if not analysis:
+                raise RuntimeError(
+                    "Could not extract headline text from the front page. "
+                    "The AI may be blocking this specific paper, or the archive is unavailable."
+                )
 
         # 3. Build Prompt and Generate Final Image
         random_vibe = _setting_enabled(settings, "randomVibe")
         vibe_id = _pick_random_vibe_id() if random_vibe else settings.get("vibe_id")
         ai_prompt = self.build_ai_prompt(vibe_id, analysis, traditional_chinese=traditional_chinese)
-        
+
         return self.generate_1min_image(ai_prompt, settings, device_config)
 
     #Render (prompt -> 1min.ai image -> fit to screen).

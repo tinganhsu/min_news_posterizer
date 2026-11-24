@@ -4,15 +4,15 @@
 
 **What it does:**
 
-- **Front Page** — Turns today’s main headline into a poster in the style you choose  
-- **Newspapers!** — Pick from 600+ newspapers sourced from Freedom Forum’s front page archive
+- **Taiwan & International News (RSS)** — Aggregates daily top stories from PTS (公視新聞), CNA (中央社), BBC Chinese (BBC 中文), Google News Taiwan/World, and Liberty Times (自由時報), or any custom RSS/Atom feed; AI picks the single most important story of the day and writes a Traditional Chinese headline & subhead
+- **Front Page** — Also supports turning today’s main headline from 600+ global newspapers (Freedom Forum) into a stylized poster
 - **What's your style?** — Includes 30+ built-in styles or vibes; add your own or delete existing ones from the UI  
-- **AI Magic** — Requires a paid [1min.ai API](https://docs.1min.ai/docs/api/create-api-key) key to analyze the front page and generate the final poster image
+- **AI Magic** — Requires a paid [1min.ai API](https://docs.1min.ai/docs/api/create-api-key) key to analyze the news and generate the final poster image
 
 - **How It Works** 
-    - You pick a newspaper 
-    - The plug-in fetches today's front page
-    - An AI vision model analyzes it & extracts the main headline + a short blurb
+    - Choose **Taiwan / International News (RSS)** (default) or a global newspaper front page
+    - The plug-in fetches today's headlines (via RSS/Atom) or front page image
+    - An AI model selects & summarizes the main headline + short blurb + visual scene
     - Using your selected style, the image model generates a clean poster layout 
 
 

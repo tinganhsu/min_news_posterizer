@@ -1,4 +1,40 @@
+<!-- News Source Selection -->
+<div class="form-group">
+    <label for="sourceType" class="form-label">News Source:</label>
+    <select id="sourceType" name="sourceType" class="form-input" onchange="updateSourceSections()">
+        <option value="taiwan_rss">台灣 / 國際重要新聞 (RSS)</option>
+        <option value="newspaper">全球紙本報紙頭版 (Freedom Forum)</option>
+    </select>
+</div>
+
+<!-- Taiwan / International RSS Section -->
+<div id="taiwanNewsSection">
+    <div class="form-group">
+        <label for="twNewsFeed" class="form-label">News Feed:</label>
+        <select id="twNewsFeed" name="twNewsFeed" class="form-input" onchange="updateCustomRssVisibility()">
+            {% if taiwan_news_feeds is defined and taiwan_news_feeds|length > 0 %}
+                {% for feed in taiwan_news_feeds %}
+                    <option value="{{ feed.id }}" {% if feed.id == default_taiwan_feed %}selected{% endif %}>{{ feed.label }}</option>
+                {% endfor %}
+            {% else %}
+                <option value="tw_global_digest" selected>台灣 / 國際每日焦點綜合（公視・中央社・BBC・Google 新聞）</option>
+            {% endif %}
+        </select>
+    </div>
+
+    <div id="customRssGroup" class="form-group" style="display:none;">
+        <label for="customRssUrl" class="form-label">Custom RSS URL:</label>
+        <input
+            type="text"
+            id="customRssUrl"
+            name="customRssUrl"
+            class="form-input"
+            placeholder="https://example.com/rss.xml (逗號分隔可填多個)" />
+    </div>
+</div>
+
 <!-- Newspaper and Location Search -->
+<div id="newspaperSection" style="display:none;">
   <div class="form-group" style="flex: 1;">
       <label for="newspaper" class="form-label">Newspaper:</label>
       <input
@@ -36,6 +72,7 @@
           {% endfor %}
       </datalist>
   </div>
+</div>
 
 <div class="separator"></div>
   
@@ -202,6 +239,24 @@
 <script>
     // Pass the newspapers data as a JavaScript object
     const newspapers = {{ newspapers|tojson }};
+
+    function updateSourceSections() {
+        const sourceType = (document.getElementById("sourceType")?.value || "taiwan_rss");
+        const twSec = document.getElementById("taiwanNewsSection");
+        const npSec = document.getElementById("newspaperSection");
+        if (twSec) twSec.style.display = (sourceType === "taiwan_rss") ? "" : "none";
+        if (npSec) npSec.style.display = (sourceType === "newspaper") ? "" : "none";
+        updateCustomRssVisibility();
+    }
+
+    function updateCustomRssVisibility() {
+        const sourceType = (document.getElementById("sourceType")?.value || "taiwan_rss");
+        const feedId = (document.getElementById("twNewsFeed")?.value || "");
+        const customGroup = document.getElementById("customRssGroup");
+        if (customGroup) {
+            customGroup.style.display = (sourceType === "taiwan_rss" && feedId === "custom_rss") ? "" : "none";
+        }
+    }
 </script>
 
 <script>
@@ -513,6 +568,9 @@ async function confirmVibeDelete() {
 
   function _captureUiSettings() {
     return {
+      sourceType: (document.getElementById("sourceType")?.value || "taiwan_rss"),
+      twNewsFeed: (document.getElementById("twNewsFeed")?.value || "tw_global_digest"),
+      customRssUrl: (document.getElementById("customRssUrl")?.value || ""),
       vibe_id: (document.getElementById("vibeSelect")?.value || ""),
       randomVibe: !!document.getElementById("randomVibe")?.checked,
       traditionalChinese: !!document.getElementById("traditionalChinese")?.checked,
@@ -526,6 +584,17 @@ async function confirmVibeDelete() {
 
   function _applyUiSettings(saved) {
     if (!saved || typeof saved !== "object") return;
+
+    if (saved.sourceType && document.getElementById("sourceType")) {
+      document.getElementById("sourceType").value = saved.sourceType;
+    }
+    if (saved.twNewsFeed && document.getElementById("twNewsFeed")) {
+      document.getElementById("twNewsFeed").value = saved.twNewsFeed;
+    }
+    if (typeof saved.customRssUrl === "string" && document.getElementById("customRssUrl")) {
+      document.getElementById("customRssUrl").value = saved.customRssUrl;
+    }
+    updateSourceSections();
 
     // Vibe (only works after vibes are loaded)
     if (saved.vibe_id && document.getElementById("vibeSelect")) {
@@ -564,7 +633,7 @@ async function confirmVibeDelete() {
     const save = () => _lsWrite(_captureUiSettings());
 
     // Save on changes
-    ["vibeSelect", "randomVibe", "traditionalChinese", "padImage", "backgroundColor", "imageModel", "analysisModel"].forEach((id) => {
+    ["sourceType", "twNewsFeed", "customRssUrl", "vibeSelect", "randomVibe", "traditionalChinese", "padImage", "backgroundColor", "imageModel", "analysisModel"].forEach((id) => {
       const el = document.getElementById(id);
       if (!el) return;
       el.addEventListener("change", save);
@@ -583,9 +652,25 @@ async function confirmVibeDelete() {
     try { await loadVibesIntoDropdown(); } catch {}
   }
 
-  // Apply localStorage last so it wins over pluginSettings defaults
+  // Apply localStorage, then let saved pluginSettings take precedence for source selection if present
   const saved = _lsRead();
   _applyUiSettings(saved);
+
+  const ps = (typeof pluginSettings !== "undefined" && pluginSettings) ? pluginSettings : null;
+  if (ps) {
+    if (ps.sourceType && document.getElementById("sourceType")) {
+      document.getElementById("sourceType").value = ps.sourceType;
+    } else if ((ps.newspaperSlug || ps.newspaper_id) && document.getElementById("sourceType")) {
+      document.getElementById("sourceType").value = "newspaper";
+    }
+    if (ps.twNewsFeed && document.getElementById("twNewsFeed")) {
+      document.getElementById("twNewsFeed").value = ps.twNewsFeed;
+    }
+    if (typeof ps.customRssUrl === "string" && document.getElementById("customRssUrl")) {
+      document.getElementById("customRssUrl").value = ps.customRssUrl;
+    }
+  }
+  updateSourceSections();
 
   _wireUiAutosave();
 
